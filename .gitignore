@@ -1,0 +1,19 @@
+# Binary and large files
+*.db
+*.sqlite3
+*.zip
+*.tar.gz
+*.7z
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Data directories (optional, but good if they are very large)
+# data/
+# outputs/
