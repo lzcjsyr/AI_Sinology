@@ -1,0 +1,35 @@
+metadata:
+  step: stage2_arbitration
+  purpose: 对双模型冲突样本进行第三方仲裁。
+
+variables:
+  matched_theme: 当前判定主题。
+  piece_id: 史料切片编号。
+  original_text: 史料原文（已截断到安全长度）。
+  llm1_result_json: LLM1 判定 JSON。
+  llm2_result_json: LLM2 判定 JSON。
+
+expected_output:
+  format: json_object
+  required_fields:
+    - is_relevant
+    - reason
+    - relevance_level
+  rule: 若 is_relevant=false，则 reason 和 relevance_level 必须为 null。
+
+prompt:
+  system: |
+    你是严谨的学术仲裁助手。
+    你必须只返回 JSON 对象，禁止输出任何额外解释。
+  user_template: |
+    你是第三方学术仲裁模型。请在给定主题下判断该史料是否相关。
+    仅返回 JSON：
+    {"is_relevant":true/false,"reason":"...或null","relevance_level":"HIGH|MEDIUM|LOW|null"}。
+
+    主题: ${matched_theme}
+    史料坐标: ${piece_id}
+    原文片段:
+    ${original_text}
+
+    LLM1判定: ${llm1_result_json}
+    LLM2判定: ${llm2_result_json}

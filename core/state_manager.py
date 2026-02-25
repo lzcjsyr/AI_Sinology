@@ -9,7 +9,7 @@ from core.utils import ensure_dir, slugify
 STAGE_FILES = {
     1: "1_research_proposal.md",
     2: "2_final_corpus.yaml",
-    3: "3_outline_matrix.json",
+    3: "3_outline_matrix.yaml",
     4: "4_first_draft.md",
     5: "5_final_manuscript.docx",
 }

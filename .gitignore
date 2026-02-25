@@ -15,4 +15,14 @@ ehthumbs.db
 Thumbs.db
 
 # Data directories
-outputs/
+outputs/*
+!outputs/.gitkeep
+
+# Testing
+tests/
+
+# Secrets
+.env
+
+# Local virtual environment
+.venv/

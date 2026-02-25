@@ -6,7 +6,7 @@ from pathlib import Path
 
 from core import AppConfig, LiteLLMClient, StateManager
 from core.logger import setup_logger
-from core.utils import parse_target_themes_from_proposal, read_json, write_json
+from core.utils import parse_target_themes_from_proposal, read_json
 from workflow import (
     run_stage1_topic_selection,
     run_stage2_data_collection,
@@ -14,7 +14,7 @@ from workflow import (
     run_stage4_drafting,
     run_stage5_polishing,
 )
-from workflow.stage2_data_collection import list_available_scopes
+from workflow.stage2_data_collection import list_available_scopes, read_cached_scopes
 
 
 def _parse_args() -> argparse.Namespace:
@@ -232,16 +232,8 @@ def main() -> int:
                     raise RuntimeError(f"未找到 Kanripo 数据目录: {config.kanripo_dir}")
 
                 scopes = _parse_scopes_arg(args.scopes)
-                scope_record_path = project_dir / "2_scope_selection.json"
-
-                if not scopes and scope_record_path.exists():
-                    try:
-                        cached = read_json(scope_record_path)
-                        cached_scopes = cached.get("scopes")
-                        if isinstance(cached_scopes, list):
-                            scopes = [s for s in cached_scopes if s in available_scopes]
-                    except Exception:  # noqa: BLE001
-                        scopes = []
+                if not scopes:
+                    scopes = read_cached_scopes(project_dir, available_scopes)
 
                 if not scopes:
                     if args.yes:
@@ -253,8 +245,6 @@ def main() -> int:
                 invalid_scopes = [s for s in scopes if s not in available_scopes]
                 if invalid_scopes:
                     raise RuntimeError(f"存在非法 scope: {invalid_scopes}")
-
-                write_json(scope_record_path, {"scopes": scopes})
 
                 run_stage2_data_collection(
                     project_dir=project_dir,

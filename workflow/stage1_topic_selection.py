@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.prompt_loader import PromptSpec, build_messages, load_prompt
 from core.utils import (
     markdown_front_matter,
     parse_json_from_text,
@@ -13,14 +15,23 @@ from core.utils import (
 )
 
 
-SECTION_SPECS = [
-    ("研究背景与问题陈述", "请写约 500 字，交代研究背景、学术语境和问题边界。"),
-    ("核心研究问题", "请提出 3-5 个层层递进的研究问题，并给出简短解释。"),
-    ("学术史述评", "请写约 1200-1500 字，梳理相关研究史并指出空白。"),
-    ("研究思路与切入点", "请写约 800 字，说明方法、材料处理和章节思路。"),
-    ("预期创新与学术价值", "请写约 500 字，明确创新点和理论/史料价值。"),
-    ("史料检索策略说明", "请给出清晰可执行的史料检索策略，覆盖语料范围与筛选标准。"),
-]
+def _load_section_specs(spec: PromptSpec) -> list[tuple[str, str]]:
+    raw_sections = spec.raw.get("section_plan")
+    if not isinstance(raw_sections, list) or not raw_sections:
+        raise RuntimeError(f"提示词 `{spec.prompt_id}` 缺少 section_plan 列表")
+
+    sections: list[tuple[str, str]] = []
+    for idx, item in enumerate(raw_sections, start=1):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"提示词 `{spec.prompt_id}` 的 sections[{idx}] 不是对象")
+        title = str(item.get("section") or "").strip()
+        instruction = str(item.get("goal") or "").strip()
+        if not title or not instruction:
+            raise RuntimeError(
+                f"提示词 `{spec.prompt_id}` 的 sections[{idx}] 缺少 section/goal"
+            )
+        sections.append((title, instruction))
+    return sections
 
 
 def _generate_target_themes(
@@ -29,23 +40,10 @@ def _generate_target_themes(
     idea: str,
     logger,
 ) -> list[dict[str, str]]:
+    prompt_spec = load_prompt("stage1_target_themes")
     last_error: Exception | None = None
     for attempt in range(1, 4):
-        messages = [
-            {
-                "role": "system",
-                "content": "你是中文学术研究选题顾问。只返回 JSON，不要输出任何额外文字。",
-            },
-            {
-                "role": "user",
-                "content": (
-                    "根据以下研究意向生成 3-5 个检索主题，字段必须为"
-                    " target_themes:[{theme,description}]。\n"
-                    "要求：主题短语明确，description 可执行。\n"
-                    f"研究意向：{idea}"
-                ),
-            },
-        ]
+        messages = build_messages(prompt_spec, idea=idea)
         try:
             response = llm_client.chat(
                 messages,
@@ -94,24 +92,19 @@ def run_stage1_topic_selection(
             return themes
 
     target_themes = _generate_target_themes(llm_client, llm_config, idea, logger)
+    section_prompt_spec = load_prompt("stage1_section_writer")
+    section_specs = _load_section_specs(section_prompt_spec)
+    context = json.dumps(target_themes, ensure_ascii=False, indent=2)
 
     sections: list[str] = []
-    for title, instruction in SECTION_SPECS:
-        messages = [
-            {
-                "role": "system",
-                "content": "你是严谨的中文学术写作助手，请输出可直接用于研究计划书的正文。",
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"研究主题：{idea}\n"
-                    f"目标检索主题：{target_themes}\n"
-                    f"写作任务：{instruction}\n"
-                    "请直接输出该小节正文，不要重复标题。"
-                ),
-            },
-        ]
+    for title, instruction in section_specs:
+        messages = build_messages(
+            section_prompt_spec,
+            idea=idea,
+            context=context,
+            section_title=title,
+            section_instruction=instruction,
+        )
 
         response = llm_client.chat(
             messages,

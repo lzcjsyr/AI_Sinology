@@ -4,7 +4,7 @@
 
 1. 选题与构思（输出 `1_research_proposal.md`）
 2. 史料搜集与交叉验证（输出 `2_final_corpus.yaml`）
-3. 大纲构建（输出 `3_outline_matrix.json`）
+3. 大纲构建（输出 `3_outline_matrix.yaml`）
 4. 撰写初稿（输出 `4_first_draft.md`）
 5. 修改与润色（输出 `5_final_manuscript.docx` 和 `5_revision_checklist.md`）
 
@@ -69,11 +69,16 @@ python3 main.py --continue-project demo_ming_study
 ## 说明
 
 - 阶段配置入口：`core/config.py`。可以清晰地按步骤切换 provider/model。
+- 提示词入口：`prompts/*.yaml`。每个步骤一个文件，统一结构为：
+  - `metadata.step`：步骤标识
+  - `metadata.purpose`：步骤用途说明
+  - `variables`：本步骤需要的输入变量说明
+  - `expected_output`：模型返回格式说明
+  - `prompt.system` / `prompt.user_template`：系统提示词与用户模板（变量缺失会直接报错终止）
 - 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并通过 `STAGE2_CONCURRENCY` 或 CLI 参数控制并发。
 - 阶段二使用 LiteLLM 调用 OpenAI 兼容 API，并支持高并发筛选。
 - 阶段二支持断点续传：`.cursor_llm1.json` 与 `.cursor_llm2.json`。
 - `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是按主题展开后的行级结果。
   - 同一个 `piece_id` 会出现 N 次（N=目标主题数），这是“单次阅读、多主题判定”的展开结构，不是重复阅读。
-  - 审计文件 `2_llm1_piece_raw.jsonl` / `2_llm2_piece_raw.jsonl` 每个 `piece_id` 只出现一次。
-  - `2_screening_audit.json` 记录本轮并发筛选的片段数、写入数与 token 统计。
+- 阶段二日志统一写入 `2_stage_manifest.json`（包含所选 scopes、状态、重试信息和 `screening_audit`）。
 - 产物按项目隔离存放在 `outputs/<project_name>/`。

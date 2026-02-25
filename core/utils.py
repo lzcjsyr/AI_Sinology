@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,32 @@ def write_text(path: Path, content: str) -> None:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_yaml(path: Path) -> Any:
+    ruby_code = (
+        "require 'yaml'; require 'json'; "
+        "data = YAML.safe_load(File.read(ARGV[0]), permitted_classes: [], aliases: false); "
+        "puts JSON.generate(data)"
+    )
+    try:
+        result = subprocess.run(
+            ["ruby", "-e", ruby_code, str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("读取 YAML 失败：系统未安装 ruby") from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"读取 YAML 失败: {path} error={detail}")
+
+    try:
+        return json.loads(result.stdout)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"YAML 解码失败: {path} error={exc}") from exc
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -67,38 +94,57 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _strip_outer_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if len(lines) < 2:
+        return stripped
+    if not lines[0].startswith("```"):
+        return stripped
+
+    tail = lines[-1].strip()
+    if tail == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _extract_first_json_value(text: str) -> Any:
+    candidates = [text.strip(), _strip_outer_code_fence(text)]
+    decoder = json.JSONDecoder()
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+        for idx, ch in enumerate(candidate):
+            if ch not in "{[":
+                continue
+            try:
+                value, _end = decoder.raw_decode(candidate[idx:])
+                return value
+            except json.JSONDecodeError:
+                continue
+
+    raise ValueError("模型返回中未找到可解析的 JSON 结构")
+
+
 def extract_json_block(text: str) -> str:
-    """Extract the first JSON object from a model response."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?", "", text).strip()
-        text = re.sub(r"```$", "", text).strip()
-
-    # Quick path: full object
-    if text.startswith("{") and text.endswith("}"):
-        return text
-
-    # Balanced-brace scan for the first JSON object.
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("模型返回中未找到 JSON 对象")
-
-    depth = 0
-    for idx in range(start, len(text)):
-        char = text[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-
-    raise ValueError("模型返回 JSON 括号不完整")
+    data = _extract_first_json_value(text)
+    if not isinstance(data, dict):
+        raise ValueError("模型返回 JSON 根节点不是对象")
+    return json.dumps(data, ensure_ascii=False)
 
 
 def parse_json_from_text(text: str) -> dict[str, Any]:
-    block = extract_json_block(text)
-    data = json.loads(block)
+    data = _extract_first_json_value(text)
     if not isinstance(data, dict):
         raise ValueError("模型返回 JSON 根节点不是对象")
     return data

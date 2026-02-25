@@ -62,11 +62,11 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(config.stage1_llm.provider, "siliconflow")
         self.assertEqual(config.stage2_llm1.provider, "siliconflow")
-        self.assertEqual(config.stage2_llm2.provider, "openrouter")
-        self.assertEqual(config.stage2_llm3.provider, "volcengine")
+        self.assertEqual(config.stage2_llm2.provider, "siliconflow")
+        self.assertEqual(config.stage2_llm3.provider, "siliconflow")
         self.assertEqual(config.stage2_llm1.api_key, "sf_key")
-        self.assertEqual(config.stage2_llm2.api_key, "or_key")
-        self.assertEqual(config.stage2_llm3.api_key, "ve_key")
+        self.assertEqual(config.stage2_llm2.api_key, "sf_key")
+        self.assertEqual(config.stage2_llm3.api_key, "sf_key")
         self.assertEqual(config.provider_base_urls["siliconflow"], "https://api.siliconflow.cn/v1")
         self.assertEqual(config.provider_base_urls["openrouter"], "https://openrouter.ai/api/v1")
         self.assertEqual(
@@ -80,16 +80,14 @@ class AppConfigTests(unittest.TestCase):
     def test_validate_api_reports_missing_provider_keys(self) -> None:
         config = self._load_with_env_file(
             """
-            SILICONFLOW_API_KEY=sf_key_only
+            OPENROUTER_API_KEY=or_key_only
             """
         )
         with self.assertRaises(ValueError) as ctx:
             config.validate_api()
         msg = str(ctx.exception)
-        self.assertIn("stage2_llm2", msg)
-        self.assertIn("OPENROUTER_API_KEY", msg)
-        self.assertIn("stage2_llm3", msg)
-        self.assertIn("VOLCENGINE_API_KEY", msg)
+        self.assertIn("stage1", msg)
+        self.assertIn("SILICONFLOW_API_KEY", msg)
 
     def test_legacy_api_key_fallback_allows_validation(self) -> None:
         config = self._load_with_env_file(

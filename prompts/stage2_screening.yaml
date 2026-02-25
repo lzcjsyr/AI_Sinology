@@ -1,0 +1,36 @@
+metadata:
+  step: stage2_screening
+  purpose: 对单条史料片段进行主题相关性筛选。
+
+variables:
+  themes_block: 主题列表文本（含 T1/T2/... 编号）。
+  piece_id: 史料切片唯一标识。
+  source_file: 来源文件名。
+  original_text: 史料原文。
+
+expected_output:
+  format: json_object
+  required_fields:
+    - matches
+  matches_rule: 每个主题必须对应一条记录，字段为 theme_id/theme/is_relevant/reason/relevance_level。
+
+prompt:
+  system: |
+    你是严谨的结构化信息抽取器。
+    你必须只返回 JSON 对象，禁止输出任何额外内容。
+  user_template: |
+    你是古籍史料筛选助手。请严格返回 JSON 对象，格式：
+    {"matches":[{"theme_id":"T1","theme":"...","is_relevant":true/false,"reason":"...或null","relevance_level":"HIGH|MEDIUM|LOW|null"}]}。
+
+    要求：
+    1) 每个主题都必须返回一条 matches 记录。
+    2) theme_id 必须严格使用给定的 T1/T2/...。
+    3) 若 is_relevant=false，则 reason 和 relevance_level 必须为 null。
+
+    目标主题：
+    ${themes_block}
+
+    史料片段 piece_id=${piece_id}
+    source_file=${source_file}
+    original_text=
+    ${original_text}

@@ -8,6 +8,7 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.prompt_loader import PromptSpec, build_messages, load_prompt
 from core.utils import append_jsonl, parse_json_from_text, read_json, read_jsonl, write_json
 
 
@@ -24,7 +25,6 @@ class ScreeningStats:
     end_index: int
     processed_fragments: int
     raw_records_written: int
-    piece_records_written: int
     total_tokens: int
     prompt_tokens: int
     completion_tokens: int
@@ -38,7 +38,6 @@ class ScreeningStats:
             "end_index": self.end_index,
             "processed_fragments": self.processed_fragments,
             "raw_records_written": self.raw_records_written,
-            "piece_records_written": self.piece_records_written,
             "total_tokens": self.total_tokens,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
@@ -133,33 +132,24 @@ async def _classify_fragment_strict(
     llm_client: OpenAICompatClient,
     model: str,
     llm_endpoint: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
     fragment: dict[str, str],
     target_themes: list[dict[str, str]],
     logger,
     max_attempts: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    theme_lines = [
+    themes_block = "\n".join(
         f"- T{i+1} | theme: {t['theme']} | description: {t.get('description', '')}"
         for i, t in enumerate(target_themes)
-    ]
-    prompt = (
-        "你是古籍史料筛选助手。请严格返回 JSON 对象，格式："
-        '{"matches":[{"theme_id":"T1","theme":"...","is_relevant":true/false,"reason":"...或null","relevance_level":"HIGH|MEDIUM|LOW|null"}]}'
-        "。\n要求：\n"
-        "1) 每个主题都必须返回一条 matches 记录。\n"
-        "2) theme_id 必须严格使用给定的 T1/T2/...，不要自造。\n"
-        "3) 若 is_relevant=false，则 reason 和 relevance_level 必须为 null。\n"
-        "4) 禁止返回任何 JSON 之外的文字。\n\n"
-        f"目标主题：\n{chr(10).join(theme_lines)}\n\n"
-        f"史料片段 piece_id={fragment['piece_id']}\n"
-        f"source_file={fragment['source_file']}\n"
-        f"original_text=\n{fragment['original_text']}"
     )
 
-    messages = [
-        {"role": "system", "content": "你是严谨的结构化信息抽取器。"},
-        {"role": "user", "content": prompt},
-    ]
+    messages = build_messages(
+        prompt_spec,
+        themes_block=themes_block,
+        piece_id=fragment["piece_id"],
+        source_file=fragment["source_file"],
+        original_text=fragment["original_text"],
+    )
 
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
@@ -209,25 +199,6 @@ def _flatten_records(
     return records
 
 
-def _piece_level_record(
-    *,
-    model_tag: str,
-    model_name: str,
-    provider: str,
-    fragment: dict[str, str],
-    matches: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "piece_id": fragment["piece_id"],
-        "source_file": fragment["source_file"],
-        "original_text": fragment["original_text"],
-        "model_tag": model_tag,
-        "model": model_name,
-        "provider": provider,
-        "matches": matches,
-    }
-
-
 def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int, int]:
     if not usage:
         return 0, 0, 0
@@ -242,10 +213,10 @@ async def _run_single_model(
     tag: str,
     llm_endpoint: LLMEndpointConfig,
     llm_client: OpenAICompatClient,
+    prompt_spec: PromptSpec,
     target_themes: list[dict[str, str]],
     fragments: list[dict[str, str]],
     raw_output_path: Path,
-    piece_output_path: Path,
     cursor_path: Path,
     logger,
     concurrency: int,
@@ -272,7 +243,6 @@ async def _run_single_model(
             end_index=next_index,
             processed_fragments=0,
             raw_records_written=0,
-            piece_records_written=0,
             total_tokens=0,
             prompt_tokens=0,
             completion_tokens=0,
@@ -284,10 +254,6 @@ async def _run_single_model(
         (str(row.get("piece_id") or ""), str(row.get("matched_theme") or ""))
         for row in existing_flat_rows
         if row.get("piece_id") and row.get("matched_theme")
-    }
-    existing_piece_rows = read_jsonl(piece_output_path)
-    seen_piece_ids = {
-        str(row.get("piece_id") or "") for row in existing_piece_rows if row.get("piece_id")
     }
 
     logger.info(
@@ -306,6 +272,7 @@ async def _run_single_model(
             llm_client=llm_client,
             model=model,
             llm_endpoint=llm_endpoint,
+            prompt_spec=prompt_spec,
             fragment=fragment,
             target_themes=target_themes,
             logger=logger,
@@ -328,7 +295,6 @@ async def _run_single_model(
         end_index=next_index,
         processed_fragments=0,
         raw_records_written=0,
-        piece_records_written=0,
         total_tokens=0,
         prompt_tokens=0,
         completion_tokens=0,
@@ -361,21 +327,6 @@ async def _run_single_model(
             while write_index in buffered_results:
                 matches, usage = buffered_results.pop(write_index)
                 fragment = fragments[write_index]
-
-                piece_id = str(fragment.get("piece_id") or "")
-                if piece_id and piece_id not in seen_piece_ids:
-                    append_jsonl(
-                        piece_output_path,
-                        _piece_level_record(
-                            model_tag=tag,
-                            model_name=model,
-                            provider=llm_endpoint.provider,
-                            fragment=fragment,
-                            matches=matches,
-                        ),
-                    )
-                    seen_piece_ids.add(piece_id)
-                    stats.piece_records_written += 1
 
                 records = _flatten_records(fragment, matches)
                 for record in records:
@@ -429,6 +380,7 @@ async def run_archival_screening(
     fragment_max_attempts: int = 3,
 ) -> tuple[Path, Path, dict[str, Any]]:
     _theme_names(target_themes)
+    prompt_spec = load_prompt("stage2_screening")
 
     fragments = read_jsonl(fragments_path)
     if not fragments:
@@ -436,8 +388,6 @@ async def run_archival_screening(
 
     llm1_raw_path = project_dir / "2_llm1_raw.jsonl"
     llm2_raw_path = project_dir / "2_llm2_raw.jsonl"
-    llm1_piece_raw_path = project_dir / "2_llm1_piece_raw.jsonl"
-    llm2_piece_raw_path = project_dir / "2_llm2_piece_raw.jsonl"
     cursor1_path = project_dir / ".cursor_llm1.json"
     cursor2_path = project_dir / ".cursor_llm2.json"
 
@@ -446,10 +396,10 @@ async def run_archival_screening(
             tag="llm1",
             llm_endpoint=llm1_endpoint,
             llm_client=llm_client,
+            prompt_spec=prompt_spec,
             target_themes=target_themes,
             fragments=fragments,
             raw_output_path=llm1_raw_path,
-            piece_output_path=llm1_piece_raw_path,
             cursor_path=cursor1_path,
             logger=logger,
             concurrency=concurrency_per_model,
@@ -459,10 +409,10 @@ async def run_archival_screening(
             tag="llm2",
             llm_endpoint=llm2_endpoint,
             llm_client=llm_client,
+            prompt_spec=prompt_spec,
             target_themes=target_themes,
             fragments=fragments,
             raw_output_path=llm2_raw_path,
-            piece_output_path=llm2_piece_raw_path,
             cursor_path=cursor2_path,
             logger=logger,
             concurrency=concurrency_per_model,
@@ -476,7 +426,6 @@ async def run_archival_screening(
         "llm1": stats1.to_dict(),
         "llm2": stats2.to_dict(),
     }
-    write_json(project_dir / "2_screening_audit.json", stats_payload)
 
     logger.info("阶段2.2完成: %s, %s", llm1_raw_path, llm2_raw_path)
     return llm1_raw_path, llm2_raw_path, stats_payload

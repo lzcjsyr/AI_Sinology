@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.prompt_loader import PromptSpec, build_messages, load_prompt
 from core.utils import clamp_text, parse_json_from_text, read_jsonl, write_json, write_yaml
 
 
@@ -127,27 +129,20 @@ def _arbitrate_single_dispute(
     *,
     llm_client: OpenAICompatClient,
     llm_endpoint: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
     dispute: dict[str, Any],
     logger,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
     model = llm_endpoint.model
-    prompt = (
-        "你是第三方学术仲裁模型。请在给定主题下判断该史料是否相关。"
-        "仅返回 JSON："
-        '{"is_relevant":true/false,"reason":"...或null","relevance_level":"HIGH|MEDIUM|LOW|null"}'
-        "。如果不相关，reason 和 relevance_level 必须为 null。\n\n"
-        f"主题: {dispute['matched_theme']}\n"
-        f"史料坐标: {dispute['piece_id']}\n"
-        f"原文片段:\n{clamp_text(str(dispute['original_text']), 2800)}\n\n"
-        f"LLM1判定: {dispute['llm1_result']}\n"
-        f"LLM2判定: {dispute['llm2_result']}\n"
+    messages = build_messages(
+        prompt_spec,
+        matched_theme=dispute["matched_theme"],
+        piece_id=dispute["piece_id"],
+        original_text=clamp_text(str(dispute["original_text"]), 2800),
+        llm1_result_json=json.dumps(dispute["llm1_result"], ensure_ascii=False),
+        llm2_result_json=json.dumps(dispute["llm2_result"], ensure_ascii=False),
     )
-
-    messages = [
-        {"role": "system", "content": "你是严谨的学术仲裁助手。"},
-        {"role": "user", "content": prompt},
-    ]
 
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
@@ -196,6 +191,7 @@ async def run_archival_arbitration(
     llm3_endpoint: LLMEndpointConfig,
     logger,
 ) -> list[dict[str, Any]]:
+    prompt_spec = load_prompt("stage2_arbitration")
     llm1_records = read_jsonl(llm1_raw_path)
     llm2_records = read_jsonl(llm2_raw_path)
     if not llm1_records or not llm2_records:
@@ -217,6 +213,7 @@ async def run_archival_arbitration(
             _arbitrate_single_dispute,
             llm_client=llm_client,
             llm_endpoint=llm3_endpoint,
+            prompt_spec=prompt_spec,
             dispute=dispute,
             logger=logger,
         )

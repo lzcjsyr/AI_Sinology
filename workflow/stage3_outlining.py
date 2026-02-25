@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
-from core.utils import parse_json_from_text, parse_target_themes_from_proposal, read_json, write_json
+from core.prompt_loader import build_messages, load_prompt
+from core.utils import parse_json_from_text, parse_target_themes_from_proposal, read_json, write_yaml
 
 
 def _collect_piece_ids(corpus: list[dict[str, Any]]) -> set[str]:
@@ -84,9 +86,10 @@ def run_stage3_outlining(
     llm_config: LLMEndpointConfig,
     logger,
 ) -> dict[str, Any]:
+    prompt_spec = load_prompt("stage3_outline")
     proposal_path = project_dir / "1_research_proposal.md"
     corpus_json_path = project_dir / "2_final_corpus.json"
-    output_path = project_dir / "3_outline_matrix.json"
+    output_path = project_dir / "3_outline_matrix.yaml"
 
     if not proposal_path.exists():
         raise RuntimeError("阶段三无法开始：缺少 1_research_proposal.md")
@@ -113,23 +116,13 @@ def run_stage3_outlining(
             f"- piece_id={rec.get('piece_id')} | theme={rec.get('matched_theme')}"
         )
 
-    prompt = (
-        "请基于以下研究主题和证据列表，生成三级论文大纲 JSON。"
-        "必须使用字段：thesis_statement, chapters[].chapter_title, chapter_argument,"
-        " sections[].section_title, section_transition, sub_sections[].sub_section_title,"
-        " sub_section_argument, evidence_anchors[], counter_arguments_rebuttals。\n"
-        "硬约束：evidence_anchors 只能使用给定 piece_id，禁止虚构。\n"
-        "只返回 JSON，不要任何额外文本。\n\n"
-        f"研究意向：{proposal_hint}\n"
-        f"目标主题：{target_themes}\n"
-        f"可用证据列表：\n{chr(10).join(corpus_summary_lines)}\n"
-    )
-
     response = llm_client.chat(
-        [
-            {"role": "system", "content": "你是学术论证架构师。"},
-            {"role": "user", "content": prompt},
-        ],
+        build_messages(
+            prompt_spec,
+            proposal_hint=proposal_hint,
+            context=json.dumps(target_themes, ensure_ascii=False, indent=2),
+            corpus_summary="\n".join(corpus_summary_lines),
+        ),
         temperature=0.2,
         **llm_config.as_client_kwargs(),
     )
@@ -140,6 +133,6 @@ def run_stage3_outlining(
     if not outline.get("chapters"):
         raise RuntimeError("阶段三失败：模型返回大纲为空。")
 
-    write_json(output_path, outline)
+    write_yaml(output_path, outline)
     logger.info("阶段三完成: %s", output_path)
     return outline

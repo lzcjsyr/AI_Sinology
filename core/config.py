@@ -42,31 +42,31 @@ PROVIDER_DEFAULT_BASE_URLS: dict[str, str] = {
 PIPELINE_LLM_CONFIG: dict[str, dict[str, str]] = {
     "stage1": {
         "provider": "siliconflow",
-        "model": "deepseek-ai/DeepSeek-V3",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
     "stage2_llm1": {
         "provider": "siliconflow",
-        "model": "deepseek-ai/DeepSeek-V3",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
     "stage2_llm2": {
-        "provider": "openrouter",
-        "model": "openai/gpt-4o-mini",
+        "provider": "siliconflow",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
     "stage2_llm3": {
-        "provider": "volcengine",
-        "model": "doubao-seed-2-0-lite-260215",
+        "provider": "siliconflow",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
     "stage3": {
         "provider": "siliconflow",
-        "model": "deepseek-ai/DeepSeek-V3",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
     "stage4": {
         "provider": "siliconflow",
-        "model": "deepseek-ai/DeepSeek-V3",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
     "stage5": {
-        "provider": "openrouter",
-        "model": "openai/gpt-4o-mini",
+        "provider": "siliconflow",
+        "model": "deepseek-ai/DeepSeek-V3.2",
     },
 }
 

@@ -1,0 +1,39 @@
+metadata:
+  step: stage1_section_writer
+  purpose: 逐节生成研究计划书正文。
+
+variables:
+  idea: 当前研究主题。
+  context: 前文内容（即上一阶段产出的 target_themes 结构化结果）。
+  section_title: 当前小节标题。
+  section_instruction: 当前小节写作任务。
+
+expected_output:
+  format: plain_text
+  rule: 仅返回当前小节正文，不要重复标题。
+
+section_plan:
+  - section: 研究背景与问题陈述
+    goal: 请写约 500 字，交代研究背景、学术语境和问题边界。
+  - section: 核心研究问题
+    goal: 请提出 3-5 个层层递进的研究问题，并给出简短解释。
+  - section: 学术史述评
+    goal: 请写约 1200-1500 字，梳理相关研究史并指出空白。
+  - section: 研究思路与切入点
+    goal: 请写约 800 字，说明方法、材料处理和章节思路。
+  - section: 预期创新与学术价值
+    goal: 请写约 500 字，明确创新点和理论/史料价值。
+  - section: 史料检索策略说明
+    goal: 请给出清晰可执行的史料检索策略，覆盖语料范围与筛选标准。
+
+prompt:
+  system: |
+    你是严谨的中文学术写作助手。
+    输出内容必须可直接用于研究计划书正文。
+  user_template: |
+    研究主题：${idea}
+    前文内容（来自上一阶段）：${context}
+    当前小节：${section_title}
+    写作任务：${section_instruction}
+
+    请直接输出该小节正文，不要重复标题，不要输出占位文字。

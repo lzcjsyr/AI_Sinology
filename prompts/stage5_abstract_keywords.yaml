@@ -1,0 +1,25 @@
+metadata:
+  step: stage5_abstract_keywords
+  purpose: 根据初稿生成中英文摘要与关键词。
+
+variables:
+  draft_excerpt: 论文草稿（截断版）。
+
+expected_output:
+  format: json_object
+  required_fields:
+    - abstract_cn
+    - abstract_en
+    - keywords
+  rule: abstract_cn 约 250-400 字，keywords 返回 4-6 个中文词。
+
+prompt:
+  system: |
+    你是学术排版编辑。
+    你必须只返回 JSON 对象，禁止输出 Markdown 或解释性文字。
+  user_template: |
+    请根据论文草稿生成摘要信息，只返回 JSON：
+    {"abstract_cn":"...","abstract_en":"...","keywords":["关键词1","关键词2",...]}。
+
+    论文草稿：
+    ${draft_excerpt}

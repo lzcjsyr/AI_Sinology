@@ -5,7 +5,8 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
-from core.utils import clamp_text, parse_json_from_text, read_json, write_text
+from core.prompt_loader import PromptSpec, build_messages, load_prompt
+from core.utils import clamp_text, parse_json_from_text, read_json, read_yaml, write_text
 
 
 def _format_blockquote(piece_id: str, text: str) -> str:
@@ -20,6 +21,7 @@ def _generate_sub_section_analysis(
     *,
     llm_client: OpenAICompatClient,
     llm_config: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
     subsection_title: str,
     subsection_argument: str,
     evidence: list[dict[str, str]],
@@ -31,24 +33,13 @@ def _generate_sub_section_analysis(
             f"- {item['piece_id']}: {clamp_text(item['original_text'], 420)}"
         )
 
-    prompt = (
-        "请为论文小节生成结构化分析，输出 JSON："
-        '{"topic_sentence":"...","analysis":"...","mini_conclusion":"..."}'
-        "。\n要求：\n"
-        "1) topic_sentence 为 1 句。\n"
-        "2) analysis 为 1-2 段，基于证据推演，不得杜撰史料。\n"
-        "3) mini_conclusion 为 1 句总结。\n"
-        "4) 只返回 JSON。\n\n"
-        f"小节标题：{subsection_title}\n"
-        f"小节论点：{subsection_argument}\n"
-        f"证据摘要：\n{chr(10).join(evidence_preview)}"
-    )
-
     response = llm_client.chat(
-        [
-            {"role": "system", "content": "你是学术论文写作助手。"},
-            {"role": "user", "content": prompt},
-        ],
+        build_messages(
+            prompt_spec,
+            subsection_title=subsection_title,
+            subsection_argument=subsection_argument,
+            evidence_preview="\n".join(evidence_preview),
+        ),
         temperature=0.4,
         **llm_config.as_client_kwargs(),
     )
@@ -70,19 +61,20 @@ def run_stage4_drafting(
     llm_config: LLMEndpointConfig,
     logger,
 ) -> str:
-    outline_path = project_dir / "3_outline_matrix.json"
+    prompt_spec = load_prompt("stage4_subsection_analysis")
+    outline_yaml_path = project_dir / "3_outline_matrix.yaml"
     corpus_path = project_dir / "2_final_corpus.json"
     output_path = project_dir / "4_first_draft.md"
 
-    if not outline_path.exists():
-        raise RuntimeError("阶段四无法开始：缺少 3_outline_matrix.json")
+    if not outline_yaml_path.exists():
+        raise RuntimeError("阶段四无法开始：缺少 3_outline_matrix.yaml")
+    outline = read_yaml(outline_yaml_path)
     if not corpus_path.exists():
         raise RuntimeError("阶段四无法开始：缺少 2_final_corpus.json")
 
-    outline = read_json(outline_path)
     corpus = read_json(corpus_path)
     if not isinstance(outline, dict):
-        raise RuntimeError("3_outline_matrix.json 结构错误")
+        raise RuntimeError("3_outline_matrix 结构错误")
     if not isinstance(corpus, list):
         raise RuntimeError("2_final_corpus.json 结构错误")
 
@@ -139,6 +131,7 @@ def run_stage4_drafting(
                 analysis = _generate_sub_section_analysis(
                     llm_client=llm_client,
                     llm_config=llm_config,
+                    prompt_spec=prompt_spec,
                     subsection_title=sub_title,
                     subsection_argument=sub_argument,
                     evidence=evidence_items,

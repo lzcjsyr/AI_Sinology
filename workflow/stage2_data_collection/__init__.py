@@ -70,14 +70,25 @@ def _write_manifest(project_dir: Path, payload: dict[str, Any]) -> None:
     write_json(project_dir / MANIFEST_FILE, payload)
 
 
+def read_cached_scopes(project_dir: Path, available_scopes: list[str]) -> list[str]:
+    manifest = _read_manifest(project_dir)
+    if not manifest:
+        return []
+    signature = manifest.get("signature")
+    if not isinstance(signature, dict):
+        return []
+    cached = signature.get("scopes")
+    if not isinstance(cached, list):
+        return []
+    available = set(available_scopes)
+    return [str(scope) for scope in cached if str(scope) in available]
+
+
 def _reset_stage2_artifacts(project_dir: Path) -> None:
     cleanup_files = [
         project_dir / "_processed_data" / "kanripo_fragments.jsonl",
         project_dir / "2_llm1_raw.jsonl",
         project_dir / "2_llm2_raw.jsonl",
-        project_dir / "2_llm1_piece_raw.jsonl",
-        project_dir / "2_llm2_piece_raw.jsonl",
-        project_dir / "2_screening_audit.json",
         project_dir / ".cursor_llm1.json",
         project_dir / ".cursor_llm2.json",
         project_dir / "2_consensus_data.yaml",
@@ -153,6 +164,7 @@ def _write_failure_report(
     target_themes: list[dict[str, str]],
     attempts: int,
     max_fragments: int | None,
+    screening_audit: dict[str, Any] | None,
 ) -> None:
     llm1_rows = read_jsonl(project_dir / "2_llm1_raw.jsonl")
     llm2_rows = read_jsonl(project_dir / "2_llm2_raw.jsonl")
@@ -163,14 +175,7 @@ def _write_failure_report(
     unique_piece_1 = len({row.get("piece_id") for row in llm1_rows if row.get("piece_id")})
     unique_piece_2 = len({row.get("piece_id") for row in llm2_rows if row.get("piece_id")})
 
-    audit_text = ""
-    audit_path = project_dir / "2_screening_audit.json"
-    if audit_path.exists():
-        try:
-            audit = read_json(audit_path)
-            audit_text = f"- screening_audit: {audit}\n"
-        except Exception:  # noqa: BLE001
-            audit_text = ""
+    audit_text = f"- screening_audit: {screening_audit}\n" if screening_audit else ""
 
     report = "\n".join(
         [
@@ -237,6 +242,7 @@ def run_stage2_data_collection(
 
     attempt = 0
     current_limit = resume_limit if can_resume else max_fragments
+    latest_screening_audit: dict[str, Any] | None = None
 
     while attempt <= max_empty_retries:
         attempt += 1
@@ -288,6 +294,7 @@ def run_stage2_data_collection(
                 fragment_max_attempts=fragment_max_attempts,
             )
         )
+        latest_screening_audit = screening_audit
 
         _write_manifest(
             project_dir,
@@ -343,6 +350,7 @@ def run_stage2_data_collection(
         target_themes=target_themes,
         attempts=attempt,
         max_fragments=current_limit,
+        screening_audit=latest_screening_audit,
     )
     _write_manifest(
         project_dir,
@@ -351,6 +359,7 @@ def run_stage2_data_collection(
             "attempt": attempt,
             "max_fragments": current_limit,
             "signature": signature,
+            "screening_audit": latest_screening_audit,
             "failure_report": "2_stage_failure_report.md",
         },
     )
@@ -360,4 +369,4 @@ def run_stage2_data_collection(
     )
 
 
-__all__ = ["run_stage2_data_collection", "list_available_scopes"]
+__all__ = ["run_stage2_data_collection", "list_available_scopes", "read_cached_scopes"]

@@ -8,6 +8,7 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.prompt_loader import PromptSpec, build_messages, load_prompt
 from core.utils import parse_json_from_text, read_json, read_text, write_text
 
 
@@ -57,24 +58,11 @@ def _verify_quotes(draft_text: str, corpus_map: dict[str, dict[str, Any]]) -> tu
 def _generate_abstract_and_keywords(
     llm_client: OpenAICompatClient,
     llm_config: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
     draft_text: str,
 ) -> dict[str, Any]:
-    prompt = (
-        "请根据论文草稿生成摘要信息，只返回 JSON："
-        '{"abstract_cn":"...","abstract_en":"...","keywords":["关键词1","关键词2",...]}。\n'
-        "要求：\n"
-        "1) abstract_cn 为 250-400 字。\n"
-        "2) abstract_en 为英文摘要。\n"
-        "3) keywords 返回 4-6 个中文关键词。\n"
-        "4) 只返回 JSON。\n\n"
-        f"论文草稿：\n{draft_text[:12000]}"
-    )
-
     response = llm_client.chat(
-        [
-            {"role": "system", "content": "你是学术排版编辑。"},
-            {"role": "user", "content": prompt},
-        ],
+        build_messages(prompt_spec, draft_excerpt=draft_text[:12000]),
         temperature=0.3,
         **llm_config.as_client_kwargs(),
     )
@@ -173,6 +161,7 @@ def run_stage5_polishing(
     llm_config: LLMEndpointConfig,
     logger,
 ) -> tuple[Path, Path, Path]:
+    prompt_spec = load_prompt("stage5_abstract_keywords")
     draft_path = project_dir / "4_first_draft.md"
     corpus_path = project_dir / "2_final_corpus.json"
 
@@ -185,7 +174,12 @@ def run_stage5_polishing(
     corpus = read_json(corpus_path)
     corpus_map = {str(item.get("piece_id")): item for item in corpus if item.get("piece_id")}
 
-    abstract_bundle = _generate_abstract_and_keywords(llm_client, llm_config, draft_text)
+    abstract_bundle = _generate_abstract_and_keywords(
+        llm_client,
+        llm_config,
+        prompt_spec,
+        draft_text,
+    )
     keywords_text = "、".join(abstract_bundle["keywords"]) if abstract_bundle["keywords"] else "待补充"
 
     polished_markdown = "\n".join(

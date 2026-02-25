@@ -1,0 +1,29 @@
+metadata:
+  step: stage4_subsection_analysis
+  purpose: 为单个小节生成主题句、分析和小结。
+
+variables:
+  subsection_title: 小节标题。
+  subsection_argument: 小节论点。
+  evidence_preview: 该小节可用证据摘要。
+
+expected_output:
+  format: json_object
+  required_fields:
+    - topic_sentence
+    - analysis
+    - mini_conclusion
+  rule: analysis 必须基于给定证据，不得杜撰史料。
+
+prompt:
+  system: |
+    你是学术论文写作助手。
+    你必须只返回 JSON 对象，禁止输出额外文字。
+  user_template: |
+    请为论文小节生成结构化分析，输出 JSON：
+    {"topic_sentence":"...","analysis":"...","mini_conclusion":"..."}。
+
+    小节标题：${subsection_title}
+    小节论点：${subsection_argument}
+    证据摘要：
+    ${evidence_preview}
