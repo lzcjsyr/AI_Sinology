@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from core import AppConfig, OpenAICompatClient, StateManager
+from core import AppConfig, LiteLLMClient, StateManager
 from core.logger import setup_logger
 from core.utils import parse_target_themes_from_proposal, read_json, write_json
 from workflow import (
@@ -24,6 +24,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--idea", help="研究意向（阶段一输入）")
     parser.add_argument("--scopes", help="阶段二语料范围，逗号分隔，如 KR3j0160,KR1a0001")
     parser.add_argument("--max-fragments", type=int, help="阶段二最多处理的切片数（调试用）")
+    parser.add_argument(
+        "--stage2-concurrency",
+        type=int,
+        help="阶段二每个模型的并发请求数",
+    )
+    parser.add_argument(
+        "--stage2-fragment-max-attempts",
+        type=int,
+        help="阶段二每条碎片的最大重试次数",
+    )
+    parser.add_argument(
+        "--stage2-max-empty-retries",
+        type=int,
+        help="阶段二最终语料为空时的重跑次数",
+    )
     parser.add_argument("--start-stage", type=int, choices=[1, 2, 3, 4, 5], help="从指定阶段开始")
     parser.add_argument("--end-stage", type=int, choices=[1, 2, 3, 4, 5], default=5, help="执行到指定阶段")
     parser.add_argument("--yes", action="store_true", help="自动确认交互提示")
@@ -156,7 +171,7 @@ def main() -> int:
         logger.info("执行阶段范围: %s -> %s", start_stage, end_stage)
 
         config.validate_api()
-        llm_client = OpenAICompatClient(config, logger)
+        llm_client = LiteLLMClient(config, logger)
 
         if start_stage > 1 and not (project_dir / "1_research_proposal.md").exists():
             print("缺少 1_research_proposal.md，无法从当前阶段继续。")
@@ -166,6 +181,21 @@ def main() -> int:
             args.max_fragments
             if args.max_fragments is not None
             else config.default_max_fragments
+        )
+        stage2_concurrency = (
+            args.stage2_concurrency
+            if args.stage2_concurrency is not None
+            else config.stage2_screening_concurrency
+        )
+        stage2_fragment_max_attempts = (
+            args.stage2_fragment_max_attempts
+            if args.stage2_fragment_max_attempts is not None
+            else config.stage2_fragment_max_attempts
+        )
+        stage2_max_empty_retries = (
+            args.stage2_max_empty_retries
+            if args.stage2_max_empty_retries is not None
+            else config.stage2_max_empty_retries
         )
 
         for stage in range(start_stage, end_stage + 1):
@@ -236,6 +266,9 @@ def main() -> int:
                     model_llm3=config.model_llm3,
                     logger=logger,
                     max_fragments=max_fragments,
+                    max_empty_retries=stage2_max_empty_retries,
+                    screening_concurrency=stage2_concurrency,
+                    fragment_max_attempts=stage2_fragment_max_attempts,
                 )
 
             elif stage == 3:

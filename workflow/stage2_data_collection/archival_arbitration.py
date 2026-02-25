@@ -41,18 +41,6 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fallback_arbitration(dispute: dict[str, Any]) -> dict[str, Any]:
-    llm1 = dispute.get("llm1_result", {})
-    llm2 = dispute.get("llm2_result", {})
-    if llm1.get("is_relevant") is True or llm2.get("is_relevant") is True:
-        return {
-            "is_relevant": True,
-            "reason": "自动仲裁回退：保守保留疑似相关史料。",
-            "relevance_level": "LOW",
-        }
-    return {"is_relevant": False, "reason": None, "relevance_level": None}
-
-
 def _build_maps(
     llm1_records: list[dict[str, Any]],
     llm2_records: list[dict[str, Any]],
@@ -140,6 +128,7 @@ def _arbitrate_single_dispute(
     model: str,
     dispute: dict[str, Any],
     logger,
+    max_attempts: int = 3,
 ) -> dict[str, Any]:
     prompt = (
         "你是第三方学术仲裁模型。请在给定主题下判断该史料是否相关。"
@@ -158,20 +147,36 @@ def _arbitrate_single_dispute(
         {"role": "user", "content": prompt},
     ]
 
-    try:
-        response = llm_client.chat(messages, model=model, temperature=0.0)
-        data = parse_json_from_text(response.content)
-        is_relevant = bool(data.get("is_relevant", False))
-        reason = data.get("reason") if is_relevant else None
-        level = _normalize_level(data.get("relevance_level")) if is_relevant else None
-        return {
-            "is_relevant": is_relevant,
-            "reason": reason,
-            "relevance_level": level,
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.warning("仲裁失败，回退启发式。piece_id=%s error=%s", dispute.get("piece_id"), e)
-        return _fallback_arbitration(dispute)
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = llm_client.chat(messages, model=model, temperature=0.0)
+            data = parse_json_from_text(response.content)
+            if not isinstance(data.get("is_relevant"), bool):
+                raise ValueError("is_relevant 不是布尔值")
+            is_relevant = bool(data.get("is_relevant"))
+            if not is_relevant:
+                return {"is_relevant": False, "reason": None, "relevance_level": None}
+
+            reason = str(data.get("reason") or "").strip()
+            level = _normalize_level(data.get("relevance_level"))
+            if not reason:
+                raise ValueError("相关仲裁缺少 reason")
+            if level is None:
+                raise ValueError("相关仲裁缺少 relevance_level")
+            return {"is_relevant": True, "reason": reason, "relevance_level": level}
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.warning(
+                "仲裁失败，准备重试。piece_id=%s attempt=%s error=%s",
+                dispute.get("piece_id"),
+                attempt,
+                e,
+            )
+
+    raise RuntimeError(
+        f"仲裁失败：piece_id={dispute.get('piece_id')} theme={dispute.get('matched_theme')} last_error={last_error}"
+    )
 
 
 async def run_archival_arbitration(

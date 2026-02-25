@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import json
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 from core.config import AppConfig
+
+try:
+    from litellm import acompletion, completion
+except Exception:  # noqa: BLE001
+    acompletion = None
+    completion = None
 
 
 @dataclass
@@ -17,11 +19,77 @@ class LLMResponse:
     usage: dict[str, Any] | None = None
 
 
-class OpenAICompatClient:
+def _response_to_dict(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if hasattr(response, "dict"):
+        return response.dict()
+    return dict(response)
+
+
+def _normalize_usage(usage: Any) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+    if hasattr(usage, "dict"):
+        return usage.dict()
+    return None
+
+
+def _extract_content(data: dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"LLM 返回缺少 choices 字段: {data}")
+
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+            else:
+                parts.append(str(part))
+        content = "\n".join(parts)
+    return str(content)
+
+
+class LiteLLMClient:
     def __init__(self, config: AppConfig, logger) -> None:
         self.config = config
         self.logger = logger
-        self.endpoint = f"{config.base_url.rstrip('/')}/chat/completions"
+
+        if completion is None or acompletion is None:
+            raise RuntimeError(
+                "未安装 litellm。请先安装后再运行：`python3 -m pip install litellm`"
+            )
+
+    def _build_payload(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str | None,
+        temperature: float,
+        max_tokens: int | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model or self.config.model_default,
+            "messages": messages,
+            "temperature": temperature,
+            "custom_llm_provider": "openai",
+            "api_key": self.config.api_key,
+            "api_base": self.config.base_url,
+            "num_retries": self.config.max_retries,
+            "timeout": self.config.request_timeout,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        return payload
 
     def chat(
         self,
@@ -31,69 +99,38 @@ class OpenAICompatClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
     ) -> LLMResponse:
-        payload: dict[str, Any] = {
-            "model": model or self.config.model_default,
-            "messages": messages,
-            "temperature": temperature,
-        }
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        payload = self._build_payload(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        response_obj = completion(**payload)
+        data = _response_to_dict(response_obj)
+        content = _extract_content(data)
+        usage = _normalize_usage(data.get("usage"))
+        return LLMResponse(raw=data, content=content, usage=usage)
 
-        data = self._post_json(payload)
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"LLM 返回缺少 choices 字段: {data}")
+    async def achat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        payload = self._build_payload(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        response_obj = await acompletion(**payload)
+        data = _response_to_dict(response_obj)
+        content = _extract_content(data)
+        usage = _normalize_usage(data.get("usage"))
+        return LLMResponse(raw=data, content=content, usage=usage)
 
-        message = choices[0].get("message") or {}
-        content = message.get("content") or ""
-        if isinstance(content, list):
-            # Some gateways return list-of-parts.
-            content = "\n".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
 
-        return LLMResponse(raw=data, content=str(content), usage=data.get("usage"))
-
-    def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
-        request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.api_key}",
-        }
-
-        backoff = self.config.retry_backoff_seconds
-        last_error: Exception | None = None
-
-        for attempt in range(1, self.config.max_retries + 1):
-            req = urllib.request.Request(
-                self.endpoint,
-                data=request_body,
-                headers=headers,
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=self.config.request_timeout) as response:
-                    raw = response.read().decode("utf-8")
-                    return json.loads(raw)
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="ignore")
-                self.logger.warning(
-                    "LLM HTTPError attempt=%s status=%s body=%s",
-                    attempt,
-                    e.code,
-                    body[:500],
-                )
-                if e.code in {429, 500, 502, 503, 504} and attempt < self.config.max_retries:
-                    time.sleep(backoff * attempt)
-                    continue
-                raise
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-                last_error = e
-                self.logger.warning("LLM request failed attempt=%s error=%s", attempt, e)
-                if attempt < self.config.max_retries:
-                    time.sleep(backoff * attempt)
-                    continue
-                break
-
-        raise RuntimeError(f"LLM 请求失败，重试耗尽: {last_error}")
+# Backward compatibility for existing imports.
+OpenAICompatClient = LiteLLMClient

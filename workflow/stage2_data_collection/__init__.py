@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from core.llm_client import OpenAICompatClient
-from core.utils import ensure_dir, read_jsonl, write_text
+from core.utils import ensure_dir, read_json, read_jsonl, write_json, write_text
 from workflow.stage2_data_collection.archival_arbitration import run_archival_arbitration
 from workflow.stage2_data_collection.archival_screening import run_archival_screening
 from workflow.stage2_data_collection.data_ingestion.parse_kanripo import (
@@ -13,12 +13,50 @@ from workflow.stage2_data_collection.data_ingestion.parse_kanripo import (
     parse_kanripo_to_fragments,
 )
 
+MANIFEST_FILE = "2_stage_manifest.json"
+
+
+def _signature(
+    selected_scopes: list[str],
+    target_themes: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "scopes": sorted(selected_scopes),
+        "target_themes": [
+            {
+                "theme": str(item.get("theme") or "").strip(),
+                "description": str(item.get("description") or "").strip(),
+            }
+            for item in target_themes
+        ],
+    }
+
+
+def _read_manifest(project_dir: Path) -> dict[str, Any] | None:
+    path = project_dir / MANIFEST_FILE
+    if not path.exists():
+        return None
+    try:
+        data = read_json(path)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _write_manifest(project_dir: Path, payload: dict[str, Any]) -> None:
+    write_json(project_dir / MANIFEST_FILE, payload)
+
 
 def _reset_stage2_artifacts(project_dir: Path) -> None:
     cleanup_files = [
         project_dir / "_processed_data" / "kanripo_fragments.jsonl",
         project_dir / "2_llm1_raw.jsonl",
         project_dir / "2_llm2_raw.jsonl",
+        project_dir / "2_llm1_piece_raw.jsonl",
+        project_dir / "2_llm2_piece_raw.jsonl",
+        project_dir / "2_screening_audit.json",
         project_dir / ".cursor_llm1.json",
         project_dir / ".cursor_llm2.json",
         project_dir / "2_consensus_data.yaml",
@@ -36,6 +74,57 @@ def _reset_stage2_artifacts(project_dir: Path) -> None:
             file_path.unlink()
 
 
+def _load_existing_final(project_dir: Path) -> list[dict[str, Any]] | None:
+    final_json_path = project_dir / "2_final_corpus.json"
+    if not final_json_path.exists():
+        return None
+    try:
+        payload = read_json(final_json_path)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(payload, list) and payload:
+        return payload
+    return None
+
+
+def _can_resume(
+    *,
+    project_dir: Path,
+    signature: dict[str, Any],
+) -> tuple[bool, int | None]:
+    manifest = _read_manifest(project_dir)
+    if not manifest:
+        return False, None
+
+    if manifest.get("signature") != signature:
+        return False, None
+
+    if manifest.get("status") not in {"running", "screening_completed", "arbitrating"}:
+        return False, None
+
+    if (project_dir / "2_final_corpus.json").exists():
+        return False, None
+
+    # Resume requires at least the generated fragments pool and one progress signal.
+    has_fragments = (project_dir / "_processed_data" / "kanripo_fragments.jsonl").exists()
+    has_cursor_or_raw = (
+        (project_dir / ".cursor_llm1.json").exists()
+        or (project_dir / ".cursor_llm2.json").exists()
+        or (project_dir / "2_llm1_raw.jsonl").exists()
+        or (project_dir / "2_llm2_raw.jsonl").exists()
+    )
+    if not (has_fragments and has_cursor_or_raw):
+        return False, None
+
+    max_fragments = manifest.get("max_fragments")
+    if max_fragments is not None:
+        try:
+            max_fragments = int(max_fragments)
+        except Exception:  # noqa: BLE001
+            max_fragments = None
+    return True, max_fragments
+
+
 def _write_failure_report(
     *,
     project_dir: Path,
@@ -50,6 +139,18 @@ def _write_failure_report(
     llm1_true = sum(1 for row in llm1_rows if row.get("is_relevant") is True)
     llm2_true = sum(1 for row in llm2_rows if row.get("is_relevant") is True)
 
+    unique_piece_1 = len({row.get("piece_id") for row in llm1_rows if row.get("piece_id")})
+    unique_piece_2 = len({row.get("piece_id") for row in llm2_rows if row.get("piece_id")})
+
+    audit_text = ""
+    audit_path = project_dir / "2_screening_audit.json"
+    if audit_path.exists():
+        try:
+            audit = read_json(audit_path)
+            audit_text = f"- screening_audit: {audit}\n"
+        except Exception:  # noqa: BLE001
+            audit_text = ""
+
     report = "\n".join(
         [
             "# 阶段二失败报告",
@@ -62,8 +163,9 @@ def _write_failure_report(
             f"- target_themes: {[item.get('theme') for item in target_themes]}",
             f"- 尝试次数: {attempts}",
             f"- 最终 max_fragments: {max_fragments}",
-            f"- llm1 原始记录数: {len(llm1_rows)} | is_relevant=true: {llm1_true}",
-            f"- llm2 原始记录数: {len(llm2_rows)} | is_relevant=true: {llm2_true}",
+            f"- llm1 原始记录数: {len(llm1_rows)} | is_relevant=true: {llm1_true} | unique_piece: {unique_piece_1}",
+            f"- llm2 原始记录数: {len(llm2_rows)} | is_relevant=true: {llm2_true} | unique_piece: {unique_piece_2}",
+            audit_text.strip(),
             "",
             "## 建议动作",
             "1. 更换或扩大检索范围（scope），确保语料与研究主题相关。",
@@ -89,6 +191,8 @@ def run_stage2_data_collection(
     logger,
     max_fragments: int | None = None,
     max_empty_retries: int = 2,
+    screening_concurrency: int = 4,
+    fragment_max_attempts: int = 3,
 ) -> list[dict[str, Any]]:
     if not selected_scopes:
         raise ValueError("阶段二需要至少一个语料范围（scope）。")
@@ -96,24 +200,55 @@ def run_stage2_data_collection(
     processed_dir = project_dir / "_processed_data"
     ensure_dir(processed_dir)
 
+    existing_final = _load_existing_final(project_dir)
+    if existing_final is not None:
+        logger.info("阶段二已存在有效 final corpus，直接复用。")
+        return existing_final
+
+    signature = _signature(selected_scopes, target_themes)
+    can_resume, resume_limit = _can_resume(project_dir=project_dir, signature=signature)
+
     attempt = 0
-    current_limit = max_fragments
-    final_corpus: list[dict[str, Any]] = []
+    current_limit = resume_limit if can_resume else max_fragments
 
     while attempt <= max_empty_retries:
         attempt += 1
-        _reset_stage2_artifacts(project_dir)
-        logger.info("阶段二尝试 #%s，max_fragments=%s", attempt, current_limit)
+        is_resume_attempt = attempt == 1 and can_resume
 
-        fragments_path = parse_kanripo_to_fragments(
-            kanripo_dir=kanripo_dir,
-            selected_scopes=selected_scopes,
-            project_processed_dir=processed_dir,
-            logger=logger,
-            max_fragments=current_limit,
+        if is_resume_attempt:
+            logger.info(
+                "阶段二尝试 #%s（断点续传），max_fragments=%s",
+                attempt,
+                current_limit,
+            )
+            fragments_path = project_dir / "_processed_data" / "kanripo_fragments.jsonl"
+            if not fragments_path.exists():
+                raise RuntimeError("阶段二断点续传失败：缺少 fragments 文件")
+        else:
+            if attempt > 1:
+                if current_limit is not None:
+                    current_limit = current_limit * 2
+            logger.info("阶段二尝试 #%s，max_fragments=%s", attempt, current_limit)
+            _reset_stage2_artifacts(project_dir)
+            fragments_path = parse_kanripo_to_fragments(
+                kanripo_dir=kanripo_dir,
+                selected_scopes=selected_scopes,
+                project_processed_dir=processed_dir,
+                logger=logger,
+                max_fragments=current_limit,
+            )
+
+        _write_manifest(
+            project_dir,
+            {
+                "status": "running",
+                "attempt": attempt,
+                "max_fragments": current_limit,
+                "signature": signature,
+            },
         )
 
-        llm1_raw_path, llm2_raw_path = asyncio.run(
+        llm1_raw_path, llm2_raw_path, screening_audit = asyncio.run(
             run_archival_screening(
                 project_dir=project_dir,
                 fragments_path=fragments_path,
@@ -122,7 +257,20 @@ def run_stage2_data_collection(
                 model_llm1=model_llm1,
                 model_llm2=model_llm2,
                 logger=logger,
+                concurrency_per_model=screening_concurrency,
+                fragment_max_attempts=fragment_max_attempts,
             )
+        )
+
+        _write_manifest(
+            project_dir,
+            {
+                "status": "screening_completed",
+                "attempt": attempt,
+                "max_fragments": current_limit,
+                "signature": signature,
+                "screening_audit": screening_audit,
+            },
         )
 
         final_corpus = asyncio.run(
@@ -135,12 +283,32 @@ def run_stage2_data_collection(
                 logger=logger,
             )
         )
+
         if final_corpus:
+            _write_manifest(
+                project_dir,
+                {
+                    "status": "completed",
+                    "attempt": attempt,
+                    "max_fragments": current_limit,
+                    "signature": signature,
+                    "final_corpus_count": len(final_corpus),
+                    "screening_audit": screening_audit,
+                },
+            )
             return final_corpus
 
         logger.warning("阶段二尝试 #%s 未产生有效 final_corpus。", attempt)
-        if current_limit is not None:
-            current_limit = current_limit * 2
+        _write_manifest(
+            project_dir,
+            {
+                "status": "empty_final",
+                "attempt": attempt,
+                "max_fragments": current_limit,
+                "signature": signature,
+                "screening_audit": screening_audit,
+            },
+        )
 
     _write_failure_report(
         project_dir=project_dir,
@@ -148,6 +316,16 @@ def run_stage2_data_collection(
         target_themes=target_themes,
         attempts=attempt,
         max_fragments=current_limit,
+    )
+    _write_manifest(
+        project_dir,
+        {
+            "status": "failed",
+            "attempt": attempt,
+            "max_fragments": current_limit,
+            "signature": signature,
+            "failure_report": "2_stage_failure_report.md",
+        },
     )
     raise RuntimeError(
         "阶段二失败：多次重试后 `2_final_corpus.yaml` 仍为空，已停止流程。"

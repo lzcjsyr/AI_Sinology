@@ -40,6 +40,9 @@ class AppConfig:
     model_llm1: str
     model_llm2: str
     model_llm3: str
+    stage2_screening_concurrency: int
+    stage2_fragment_max_attempts: int
+    stage2_max_empty_retries: int
 
     @classmethod
     def load(cls, root_dir: Path) -> "AppConfig":
@@ -76,6 +79,13 @@ class AppConfig:
             model_llm1=pick("MODEL_LLM1", model_default) or "gpt-4o-mini",
             model_llm2=pick("MODEL_LLM2", model_default) or "gpt-4o-mini",
             model_llm3=pick("MODEL_LLM3", model_default) or "gpt-4o-mini",
+            stage2_screening_concurrency=int(pick("STAGE2_CONCURRENCY", "4") or "4"),
+            stage2_fragment_max_attempts=int(
+                pick("STAGE2_FRAGMENT_MAX_ATTEMPTS", "3") or "3"
+            ),
+            stage2_max_empty_retries=int(
+                pick("STAGE2_MAX_EMPTY_RETRIES", "2") or "2"
+            ),
         )
 
     def validate_api(self) -> None:
