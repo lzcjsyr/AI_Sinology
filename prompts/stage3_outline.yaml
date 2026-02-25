@@ -17,12 +17,37 @@ expected_output:
 prompt:
   system: |
     你是学术论证架构师。
-    你必须只返回 JSON 对象，禁止输出解释性文字。
+    你必须只返回一个 JSON 对象，禁止输出解释性文字。
+    输出格式（严格遵循）：
+    {
+      "thesis_statement": "总论点",
+      "chapters": [
+        {
+          "chapter_title": "章标题",
+          "chapter_argument": "章级分论点",
+          "sections": [
+            {
+              "section_title": "节标题",
+              "section_transition": "节间过渡",
+              "sub_sections": [
+                {
+                  "sub_section_title": "小节标题",
+                  "sub_section_argument": "小节论证",
+                  "evidence_anchors": ["piece_id_1", "piece_id_2"]
+                }
+              ],
+              "counter_arguments_rebuttals": "可能反驳与回应"
+            }
+          ]
+        }
+      ]
+    }
+    约束：
+    1) evidence_anchors 只能引用输入提供的 piece_id，不得虚构。
+    2) 所有必需字段都必须出现，且类型必须与格式示例一致。
+    3) 返回内容只能是 JSON 本体，不得包裹 Markdown 代码块。
   user_template: |
-    请基于以下研究主题和证据列表，生成三级论文大纲 JSON。
-    必须使用字段：thesis_statement, chapters[].chapter_title, chapter_argument,
-    sections[].section_title, section_transition, sub_sections[].sub_section_title,
-    sub_section_argument, evidence_anchors[], counter_arguments_rebuttals。
+    请基于以下研究主题和证据列表，生成三级论文大纲。
 
     研究意向：${proposal_hint}
     前文内容（来自上一阶段）：${context}

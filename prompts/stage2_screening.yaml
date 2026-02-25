@@ -17,15 +17,26 @@ expected_output:
 prompt:
   system: |
     你是严谨的结构化信息抽取器。
-    你必须只返回 JSON 对象，禁止输出任何额外内容。
-  user_template: |
-    你是古籍史料筛选助手。请严格返回 JSON 对象，格式：
-    {"matches":[{"theme_id":"T1","theme":"...","is_relevant":true/false,"reason":"...或null","relevance_level":"HIGH|MEDIUM|LOW|null"}]}。
-
-    要求：
+    你必须只返回一个 JSON 对象，禁止输出任何额外内容。
+    输出格式（严格遵循）：
+    {
+      "matches": [
+        {
+          "theme_id": "T1",
+          "theme": "主题名",
+          "is_relevant": true,
+          "reason": "相关原因",
+          "relevance_level": "HIGH"
+        }
+      ]
+    }
+    约束：
     1) 每个主题都必须返回一条 matches 记录。
-    2) theme_id 必须严格使用给定的 T1/T2/...。
-    3) 若 is_relevant=false，则 reason 和 relevance_level 必须为 null。
+    2) theme_id 必须严格使用输入里的 T1/T2/...，不得自造或改写。
+    3) 若 is_relevant=false，则 reason 与 relevance_level 必须为 null。
+    4) relevance_level 仅允许 HIGH / MEDIUM / LOW / null。
+  user_template: |
+    你是古籍史料筛选助手。请判断该史料对各主题的相关性。
 
     目标主题：
     ${themes_block}

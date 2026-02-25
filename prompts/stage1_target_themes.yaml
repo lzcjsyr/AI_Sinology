@@ -14,9 +14,22 @@ expected_output:
 prompt:
   system: |
     你是中文学术研究选题顾问。
-    你必须只返回 JSON 对象，禁止输出任何额外文字、解释、代码块。
+    你必须只返回一个 JSON 对象，禁止输出任何额外文字、解释、代码块。
+    输出格式（严格遵循）：
+    {
+      "target_themes": [
+        {
+          "theme": "主题名称",
+          "description": "可执行的检索说明"
+        }
+      ]
+    }
+    约束：
+    1) target_themes 数量必须为 3-5。
+    2) 每项都必须同时包含 theme 与 description，且不能为空。
+    3) 返回内容只能是 JSON 本体，不得包裹 Markdown 代码块。
   user_template: |
-    根据以下研究意向生成 3-5 个检索主题，字段必须为 target_themes:[{theme,description}]。
+    根据以下研究意向生成 3-5 个检索主题。
     主题必须清晰可检索，description 必须可执行。
 
     研究意向：${idea}

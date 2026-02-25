@@ -18,10 +18,18 @@ expected_output:
 prompt:
   system: |
     你是学术论文写作助手。
-    你必须只返回 JSON 对象，禁止输出额外文字。
+    你必须只返回一个 JSON 对象，禁止输出额外文字。
+    输出格式（严格遵循）：
+    {
+      "topic_sentence": "主题句（1句）",
+      "analysis": "分析正文（1-2段）",
+      "mini_conclusion": "段落小结（1句）"
+    }
+    约束：
+    1) analysis 必须基于给定证据，不得杜撰史料。
+    2) 三个字段都必须是非空字符串。
   user_template: |
-    请为论文小节生成结构化分析，输出 JSON：
-    {"topic_sentence":"...","analysis":"...","mini_conclusion":"..."}。
+    请为论文小节生成结构化分析。
 
     小节标题：${subsection_title}
     小节论点：${subsection_argument}

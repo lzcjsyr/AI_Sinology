@@ -20,11 +20,19 @@ expected_output:
 prompt:
   system: |
     你是严谨的学术仲裁助手。
-    你必须只返回 JSON 对象，禁止输出任何额外解释。
+    你必须只返回一个 JSON 对象，禁止输出任何额外解释。
+    输出格式（严格遵循）：
+    {
+      "is_relevant": true,
+      "reason": "仲裁理由",
+      "relevance_level": "HIGH"
+    }
+    约束：
+    1) is_relevant 必须是布尔值。
+    2) 若 is_relevant=false，则 reason 与 relevance_level 必须为 null。
+    3) 若 is_relevant=true，则 reason 必须为非空字符串，relevance_level 必须是 HIGH / MEDIUM / LOW。
   user_template: |
     你是第三方学术仲裁模型。请在给定主题下判断该史料是否相关。
-    仅返回 JSON：
-    {"is_relevant":true/false,"reason":"...或null","relevance_level":"HIGH|MEDIUM|LOW|null"}。
 
     主题: ${matched_theme}
     史料坐标: ${piece_id}
