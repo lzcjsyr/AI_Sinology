@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import (
     markdown_front_matter,
@@ -24,6 +25,7 @@ SECTION_SPECS = [
 
 def _generate_target_themes(
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     idea: str,
     logger,
 ) -> list[dict[str, str]]:
@@ -45,7 +47,11 @@ def _generate_target_themes(
             },
         ]
         try:
-            response = llm_client.chat(messages, temperature=0.2)
+            response = llm_client.chat(
+                messages,
+                temperature=0.2,
+                **llm_config.as_client_kwargs(),
+            )
             payload = parse_json_from_text(response.content)
             items = payload.get("target_themes")
             if not isinstance(items, list):
@@ -74,6 +80,7 @@ def run_stage1_topic_selection(
     project_dir: Path,
     idea: str,
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     logger,
     overwrite: bool = False,
 ) -> list[dict[str, str]]:
@@ -86,7 +93,7 @@ def run_stage1_topic_selection(
             logger.info("阶段一已存在，复用: %s", output_path)
             return themes
 
-    target_themes = _generate_target_themes(llm_client, idea, logger)
+    target_themes = _generate_target_themes(llm_client, llm_config, idea, logger)
 
     sections: list[str] = []
     for title, instruction in SECTION_SPECS:
@@ -106,7 +113,11 @@ def run_stage1_topic_selection(
             },
         ]
 
-        response = llm_client.chat(messages, temperature=0.4)
+        response = llm_client.chat(
+            messages,
+            temperature=0.4,
+            **llm_config.as_client_kwargs(),
+        )
         content = response.content.strip()
         if not content:
             raise RuntimeError(f"阶段一失败：小节 {title} 返回空内容。")

@@ -217,6 +217,7 @@ def main() -> int:
                     project_dir=project_dir,
                     idea=idea,
                     llm_client=llm_client,
+                    llm_config=config.stage1_llm,
                     logger=logger,
                     overwrite=args.overwrite_stage1,
                 )
@@ -261,9 +262,9 @@ def main() -> int:
                     selected_scopes=scopes,
                     target_themes=themes,
                     llm_client=llm_client,
-                    model_llm1=config.model_llm1,
-                    model_llm2=config.model_llm2,
-                    model_llm3=config.model_llm3,
+                    llm1_endpoint=config.stage2_llm1,
+                    llm2_endpoint=config.stage2_llm2,
+                    llm3_endpoint=config.stage2_llm3,
                     logger=logger,
                     max_fragments=max_fragments,
                     max_empty_retries=stage2_max_empty_retries,
@@ -272,13 +273,28 @@ def main() -> int:
                 )
 
             elif stage == 3:
-                run_stage3_outlining(project_dir=project_dir, llm_client=llm_client, logger=logger)
+                run_stage3_outlining(
+                    project_dir=project_dir,
+                    llm_client=llm_client,
+                    llm_config=config.stage3_llm,
+                    logger=logger,
+                )
 
             elif stage == 4:
-                run_stage4_drafting(project_dir=project_dir, llm_client=llm_client, logger=logger)
+                run_stage4_drafting(
+                    project_dir=project_dir,
+                    llm_client=llm_client,
+                    llm_config=config.stage4_llm,
+                    logger=logger,
+                )
 
             elif stage == 5:
-                run_stage5_polishing(project_dir=project_dir, llm_client=llm_client, logger=logger)
+                run_stage5_polishing(
+                    project_dir=project_dir,
+                    llm_client=llm_client,
+                    llm_config=config.stage5_llm,
+                    logger=logger,
+                )
 
         print(f"\n流程执行完成。项目目录: {project_dir}")
         return 0

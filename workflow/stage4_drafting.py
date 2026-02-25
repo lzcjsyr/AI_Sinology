@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import clamp_text, parse_json_from_text, read_json, write_text
 
@@ -18,6 +19,7 @@ def _format_blockquote(piece_id: str, text: str) -> str:
 def _generate_sub_section_analysis(
     *,
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     subsection_title: str,
     subsection_argument: str,
     evidence: list[dict[str, str]],
@@ -48,6 +50,7 @@ def _generate_sub_section_analysis(
             {"role": "user", "content": prompt},
         ],
         temperature=0.4,
+        **llm_config.as_client_kwargs(),
     )
     data = parse_json_from_text(response.content)
     result = {
@@ -64,6 +67,7 @@ def run_stage4_drafting(
     *,
     project_dir: Path,
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     logger,
 ) -> str:
     outline_path = project_dir / "3_outline_matrix.json"
@@ -134,6 +138,7 @@ def run_stage4_drafting(
 
                 analysis = _generate_sub_section_analysis(
                     llm_client=llm_client,
+                    llm_config=llm_config,
                     subsection_title=sub_title,
                     subsection_argument=sub_argument,
                     evidence=evidence_items,

@@ -10,21 +10,45 @@
 
 ## 快速开始
 
-1. 配置环境变量（或 `.env`）：
+1. 在 `core/config.py` 中按阶段配置模型与供应商（默认已给出示例）：
 
-```bash
-API_KEY=...
-BASE_URL=...
-MODEL=...
+```python
+PIPELINE_LLM_CONFIG = {
+    "stage1": {"provider": "siliconflow", "model": "..."},
+    "stage2_llm1": {"provider": "siliconflow", "model": "..."},
+    "stage2_llm2": {"provider": "openrouter", "model": "..."},
+    "stage2_llm3": {"provider": "volcengine", "model": "..."},
+    "stage3": {"provider": "siliconflow", "model": "..."},
+    "stage4": {"provider": "siliconflow", "model": "..."},
+    "stage5": {"provider": "openrouter", "model": "..."},
+}
 ```
 
-2. 安装依赖：
+默认 provider base URL 也写在 `core/config.py`：
+
+```python
+PROVIDER_DEFAULT_BASE_URLS = {
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
+}
+```
+
+2. 配置 `.env`（只放 key，不放模型）：
+
+```bash
+SILICONFLOW_API_KEY=...
+OPENROUTER_API_KEY=...
+VOLCENGINE_API_KEY=...
+```
+
+3. 安装依赖：
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-3. 新建项目并跑完整流程（示例）：
+4. 新建项目并跑完整流程（示例）：
 
 ```bash
 python3 main.py \
@@ -36,7 +60,7 @@ python3 main.py \
   --yes
 ```
 
-4. 继续已有项目：
+5. 继续已有项目：
 
 ```bash
 python3 main.py --continue-project demo_ming_study
@@ -44,6 +68,8 @@ python3 main.py --continue-project demo_ming_study
 
 ## 说明
 
+- 阶段配置入口：`core/config.py`。可以清晰地按步骤切换 provider/model。
+- 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并通过 `STAGE2_CONCURRENCY` 或 CLI 参数控制并发。
 - 阶段二使用 LiteLLM 调用 OpenAI 兼容 API，并支持高并发筛选。
 - 阶段二支持断点续传：`.cursor_llm1.json` 与 `.cursor_llm2.json`。
 - `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是按主题展开后的行级结果。

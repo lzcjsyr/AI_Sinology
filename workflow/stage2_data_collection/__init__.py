@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import ensure_dir, read_json, read_jsonl, write_json, write_text
 from workflow.stage2_data_collection.archival_arbitration import run_archival_arbitration
@@ -19,6 +20,9 @@ MANIFEST_FILE = "2_stage_manifest.json"
 def _signature(
     selected_scopes: list[str],
     target_themes: list[dict[str, str]],
+    llm1_endpoint: LLMEndpointConfig,
+    llm2_endpoint: LLMEndpointConfig,
+    llm3_endpoint: LLMEndpointConfig,
 ) -> dict[str, Any]:
     return {
         "scopes": sorted(selected_scopes),
@@ -28,6 +32,23 @@ def _signature(
                 "description": str(item.get("description") or "").strip(),
             }
             for item in target_themes
+        ],
+        "stage2_llms": [
+            {
+                "stage": llm1_endpoint.stage,
+                "provider": llm1_endpoint.provider,
+                "model": llm1_endpoint.model,
+            },
+            {
+                "stage": llm2_endpoint.stage,
+                "provider": llm2_endpoint.provider,
+                "model": llm2_endpoint.model,
+            },
+            {
+                "stage": llm3_endpoint.stage,
+                "provider": llm3_endpoint.provider,
+                "model": llm3_endpoint.model,
+            },
         ],
     }
 
@@ -185,9 +206,9 @@ def run_stage2_data_collection(
     selected_scopes: list[str],
     target_themes: list[dict[str, str]],
     llm_client: OpenAICompatClient,
-    model_llm1: str,
-    model_llm2: str,
-    model_llm3: str,
+    llm1_endpoint: LLMEndpointConfig,
+    llm2_endpoint: LLMEndpointConfig,
+    llm3_endpoint: LLMEndpointConfig,
     logger,
     max_fragments: int | None = None,
     max_empty_retries: int = 2,
@@ -205,7 +226,13 @@ def run_stage2_data_collection(
         logger.info("阶段二已存在有效 final corpus，直接复用。")
         return existing_final
 
-    signature = _signature(selected_scopes, target_themes)
+    signature = _signature(
+        selected_scopes,
+        target_themes,
+        llm1_endpoint,
+        llm2_endpoint,
+        llm3_endpoint,
+    )
     can_resume, resume_limit = _can_resume(project_dir=project_dir, signature=signature)
 
     attempt = 0
@@ -254,8 +281,8 @@ def run_stage2_data_collection(
                 fragments_path=fragments_path,
                 target_themes=target_themes,
                 llm_client=llm_client,
-                model_llm1=model_llm1,
-                model_llm2=model_llm2,
+                llm1_endpoint=llm1_endpoint,
+                llm2_endpoint=llm2_endpoint,
                 logger=logger,
                 concurrency_per_model=screening_concurrency,
                 fragment_max_attempts=fragment_max_attempts,
@@ -279,7 +306,7 @@ def run_stage2_data_collection(
                 llm1_raw_path=llm1_raw_path,
                 llm2_raw_path=llm2_raw_path,
                 llm_client=llm_client,
-                model_llm3=model_llm3,
+                llm3_endpoint=llm3_endpoint,
                 logger=logger,
             )
         )

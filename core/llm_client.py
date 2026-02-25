@@ -74,6 +74,8 @@ class LiteLLMClient:
         messages: list[dict[str, str]],
         *,
         model: str | None,
+        api_key: str | None,
+        api_base: str | None,
         temperature: float,
         max_tokens: int | None,
     ) -> dict[str, Any]:
@@ -82,8 +84,8 @@ class LiteLLMClient:
             "messages": messages,
             "temperature": temperature,
             "custom_llm_provider": "openai",
-            "api_key": self.config.api_key,
-            "api_base": self.config.base_url,
+            "api_key": api_key or self.config.api_key,
+            "api_base": api_base or self.config.base_url,
             "num_retries": self.config.max_retries,
             "timeout": self.config.request_timeout,
         }
@@ -96,12 +98,16 @@ class LiteLLMClient:
         messages: list[dict[str, str]],
         *,
         model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
     ) -> LLMResponse:
         payload = self._build_payload(
             messages,
             model=model,
+            api_key=api_key,
+            api_base=api_base,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -116,12 +122,16 @@ class LiteLLMClient:
         messages: list[dict[str, str]],
         *,
         model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
     ) -> LLMResponse:
         payload = self._build_payload(
             messages,
             model=model,
+            api_key=api_key,
+            api_base=api_base,
             temperature=temperature,
             max_tokens=max_tokens,
         )

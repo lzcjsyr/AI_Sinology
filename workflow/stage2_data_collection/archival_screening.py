@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import append_jsonl, parse_json_from_text, read_json, read_jsonl, write_json
 
@@ -18,6 +19,7 @@ def _now_iso() -> str:
 class ScreeningStats:
     model_tag: str
     model_name: str
+    provider: str
     start_index: int
     end_index: int
     processed_fragments: int
@@ -31,6 +33,7 @@ class ScreeningStats:
         return {
             "model_tag": self.model_tag,
             "model_name": self.model_name,
+            "provider": self.provider,
             "start_index": self.start_index,
             "end_index": self.end_index,
             "processed_fragments": self.processed_fragments,
@@ -129,6 +132,7 @@ async def _classify_fragment_strict(
     *,
     llm_client: OpenAICompatClient,
     model: str,
+    llm_endpoint: LLMEndpointConfig,
     fragment: dict[str, str],
     target_themes: list[dict[str, str]],
     logger,
@@ -160,7 +164,13 @@ async def _classify_fragment_strict(
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await llm_client.achat(messages, model=model, temperature=0.0)
+            response = await llm_client.achat(
+                messages,
+                model=model,
+                api_key=llm_endpoint.api_key,
+                api_base=llm_endpoint.base_url,
+                temperature=0.0,
+            )
             payload = parse_json_from_text(response.content)
             matches = _normalize_matches_strict(payload, target_themes)
             return matches, response.usage
@@ -203,6 +213,7 @@ def _piece_level_record(
     *,
     model_tag: str,
     model_name: str,
+    provider: str,
     fragment: dict[str, str],
     matches: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -212,6 +223,7 @@ def _piece_level_record(
         "original_text": fragment["original_text"],
         "model_tag": model_tag,
         "model": model_name,
+        "provider": provider,
         "matches": matches,
     }
 
@@ -228,7 +240,7 @@ def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int, int]:
 async def _run_single_model(
     *,
     tag: str,
-    model: str,
+    llm_endpoint: LLMEndpointConfig,
     llm_client: OpenAICompatClient,
     target_themes: list[dict[str, str]],
     fragments: list[dict[str, str]],
@@ -239,6 +251,8 @@ async def _run_single_model(
     concurrency: int,
     fragment_max_attempts: int,
 ) -> ScreeningStats:
+    model = llm_endpoint.model
+
     next_index = 0
     if cursor_path.exists():
         try:
@@ -253,6 +267,7 @@ async def _run_single_model(
         return ScreeningStats(
             model_tag=tag,
             model_name=model,
+            provider=llm_endpoint.provider,
             start_index=next_index,
             end_index=next_index,
             processed_fragments=0,
@@ -276,11 +291,13 @@ async def _run_single_model(
     }
 
     logger.info(
-        "%s 从 index=%s 开始处理，总量=%s，并发=%s",
+        "%s 从 index=%s 开始处理，总量=%s，并发=%s，provider=%s，model=%s",
         tag,
         next_index,
         total,
         concurrency,
+        llm_endpoint.provider,
+        llm_endpoint.model,
     )
 
     async def run_one(idx: int) -> tuple[int, list[dict[str, Any]], dict[str, Any] | None]:
@@ -288,6 +305,7 @@ async def _run_single_model(
         matches, usage = await _classify_fragment_strict(
             llm_client=llm_client,
             model=model,
+            llm_endpoint=llm_endpoint,
             fragment=fragment,
             target_themes=target_themes,
             logger=logger,
@@ -305,6 +323,7 @@ async def _run_single_model(
     stats = ScreeningStats(
         model_tag=tag,
         model_name=model,
+        provider=llm_endpoint.provider,
         start_index=next_index,
         end_index=next_index,
         processed_fragments=0,
@@ -350,6 +369,7 @@ async def _run_single_model(
                         _piece_level_record(
                             model_tag=tag,
                             model_name=model,
+                            provider=llm_endpoint.provider,
                             fragment=fragment,
                             matches=matches,
                         ),
@@ -379,6 +399,7 @@ async def _run_single_model(
                     {
                         "tag": tag,
                         "model": model,
+                        "provider": llm_endpoint.provider,
                         "next_index": write_index,
                         "last_piece_id": fragment.get("piece_id"),
                         "updated_at": _now_iso(),
@@ -401,8 +422,8 @@ async def run_archival_screening(
     fragments_path: Path,
     target_themes: list[dict[str, str]],
     llm_client: OpenAICompatClient,
-    model_llm1: str,
-    model_llm2: str,
+    llm1_endpoint: LLMEndpointConfig,
+    llm2_endpoint: LLMEndpointConfig,
     logger,
     concurrency_per_model: int = 4,
     fragment_max_attempts: int = 3,
@@ -423,7 +444,7 @@ async def run_archival_screening(
     stats1, stats2 = await asyncio.gather(
         _run_single_model(
             tag="llm1",
-            model=model_llm1,
+            llm_endpoint=llm1_endpoint,
             llm_client=llm_client,
             target_themes=target_themes,
             fragments=fragments,
@@ -436,7 +457,7 @@ async def run_archival_screening(
         ),
         _run_single_model(
             tag="llm2",
-            model=model_llm2,
+            llm_endpoint=llm2_endpoint,
             llm_client=llm_client,
             target_themes=target_themes,
             fragments=fragments,

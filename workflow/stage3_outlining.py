@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import parse_json_from_text, parse_target_themes_from_proposal, read_json, write_json
 
@@ -80,6 +81,7 @@ def run_stage3_outlining(
     *,
     project_dir: Path,
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     logger,
 ) -> dict[str, Any]:
     proposal_path = project_dir / "1_research_proposal.md"
@@ -129,6 +131,7 @@ def run_stage3_outlining(
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
+        **llm_config.as_client_kwargs(),
     )
     outline = parse_json_from_text(response.content)
 

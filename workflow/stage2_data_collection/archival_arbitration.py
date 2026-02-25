@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import clamp_text, parse_json_from_text, read_jsonl, write_json, write_yaml
 
@@ -125,11 +126,12 @@ def _consensus_and_disputes(
 def _arbitrate_single_dispute(
     *,
     llm_client: OpenAICompatClient,
-    model: str,
+    llm_endpoint: LLMEndpointConfig,
     dispute: dict[str, Any],
     logger,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
+    model = llm_endpoint.model
     prompt = (
         "你是第三方学术仲裁模型。请在给定主题下判断该史料是否相关。"
         "仅返回 JSON："
@@ -150,7 +152,13 @@ def _arbitrate_single_dispute(
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            response = llm_client.chat(messages, model=model, temperature=0.0)
+            response = llm_client.chat(
+                messages,
+                model=model,
+                api_key=llm_endpoint.api_key,
+                api_base=llm_endpoint.base_url,
+                temperature=0.0,
+            )
             data = parse_json_from_text(response.content)
             if not isinstance(data.get("is_relevant"), bool):
                 raise ValueError("is_relevant 不是布尔值")
@@ -185,7 +193,7 @@ async def run_archival_arbitration(
     llm1_raw_path: Path,
     llm2_raw_path: Path,
     llm_client: OpenAICompatClient,
-    model_llm3: str,
+    llm3_endpoint: LLMEndpointConfig,
     logger,
 ) -> list[dict[str, Any]]:
     llm1_records = read_jsonl(llm1_raw_path)
@@ -208,7 +216,7 @@ async def run_archival_arbitration(
         result = await asyncio.to_thread(
             _arbitrate_single_dispute,
             llm_client=llm_client,
-            model=model_llm3,
+            llm_endpoint=llm3_endpoint,
             dispute=dispute,
             logger=logger,
         )

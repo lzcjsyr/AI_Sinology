@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.utils import parse_json_from_text, read_json, read_text, write_text
 
@@ -55,6 +56,7 @@ def _verify_quotes(draft_text: str, corpus_map: dict[str, dict[str, Any]]) -> tu
 
 def _generate_abstract_and_keywords(
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     draft_text: str,
 ) -> dict[str, Any]:
     prompt = (
@@ -74,6 +76,7 @@ def _generate_abstract_and_keywords(
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
+        **llm_config.as_client_kwargs(),
     )
     data = parse_json_from_text(response.content)
     keywords = data.get("keywords")
@@ -167,6 +170,7 @@ def run_stage5_polishing(
     *,
     project_dir: Path,
     llm_client: OpenAICompatClient,
+    llm_config: LLMEndpointConfig,
     logger,
 ) -> tuple[Path, Path, Path]:
     draft_path = project_dir / "4_first_draft.md"
@@ -181,7 +185,7 @@ def run_stage5_polishing(
     corpus = read_json(corpus_path)
     corpus_map = {str(item.get("piece_id")): item for item in corpus if item.get("piece_id")}
 
-    abstract_bundle = _generate_abstract_and_keywords(llm_client, draft_text)
+    abstract_bundle = _generate_abstract_and_keywords(llm_client, llm_config, draft_text)
     keywords_text = "、".join(abstract_bundle["keywords"]) if abstract_bundle["keywords"] else "待补充"
 
     polished_markdown = "\n".join(
