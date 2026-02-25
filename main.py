@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -15,7 +16,14 @@ from workflow import (
     run_stage4_drafting,
     run_stage5_polishing,
 )
-from workflow.stage2_data_collection import list_available_scopes, read_cached_scopes
+from workflow.stage2_data_collection import (
+    ScopeOption,
+    list_available_scope_dirs,
+    list_available_scope_options,
+    read_cached_scopes,
+)
+
+SCOPE_CODE_PATTERN = re.compile(r"KR[1-4][a-z](?:\d+)?", re.IGNORECASE)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -23,7 +31,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--new-project", help="创建新项目名")
     parser.add_argument("--continue-project", help="继续已有项目名")
     parser.add_argument("--idea", help="研究意向（阶段一输入）")
-    parser.add_argument("--scopes", help="阶段二语料范围，逗号分隔，如 KR3j0160,KR1a0001")
+    parser.add_argument("--scopes", help="阶段二语料范围，逗号分隔，如 KR1a,KR3j（KR-Catalog 二级类目）")
+    parser.add_argument("--scope-dirs", help="阶段二额外目录，逗号分隔，如 KR1a0001,KR3j0160")
     parser.add_argument("--max-fragments", type=int, help="阶段二最多处理的切片数（调试用）")
     parser.add_argument(
         "--stage2-concurrency",
@@ -91,29 +100,101 @@ def _choose_project_interactive(state_manager: StateManager, ui: CLIUI) -> tuple
         ui.warning("输入无效，请重试。")
 
 
-def _choose_scopes_interactive(available_scopes: list[str], ui: CLIUI) -> list[str]:
-    ui.section("请选择 Kanripo 检索范围（可输入多个，用逗号分隔）")
-    preview = available_scopes[:30]
-    ui.info("可选示例（前30个）")
-    ui.list_items(preview)
+def _normalize_scope_code(raw_scope: str) -> str:
+    token = raw_scope.strip()
+    if not token:
+        return ""
 
+    match = SCOPE_CODE_PATTERN.search(token)
+    if match:
+        token = match.group(0)
+
+    if token.lower().startswith("kr") and len(token) > 2:
+        return f"KR{token[2:].lower()}"
+    return token
+
+
+def _choose_scopes_interactive(scope_options: list[ScopeOption], ui: CLIUI) -> list[str]:
+    if not scope_options:
+        return []
+
+    available_scopes = {option.code for option in scope_options}
+
+    ui.section("请选择 Kanripo 检索范围（可输入多个，用逗号分隔）")
+    ui.info("可选条目（来自 KR-Catalog/KR/KR1~KR4.txt）")
     while True:
-        raw = ui.prompt("输入 scope 列表，例如 KR3j0160,KR1a0001:")
-        if not raw:
-            ui.warning("至少输入一个 scope。")
-            continue
-        scopes = [s.strip() for s in raw.split(",") if s.strip()]
-        invalid = [s for s in scopes if s not in available_scopes]
-        if invalid:
-            ui.warning(f"以下 scope 不存在: {invalid}")
-            continue
-        return scopes
+        picked = ui.multi_select_with_start(
+            title="范围多选：方向键移动，Enter 选中/取消，Tab 切到开始按钮",
+            options=[(option.code, option.display_label) for option in scope_options],
+            start_label="开始",
+            cancel_label="取消",
+        )
+        if picked is None:
+            reason = ui.last_multiselect_unavailable_reason() or "未知原因"
+            ui.info(f"当前终端暂不能使用交互多选（{reason}），自动切换为手动输入模式。")
+            ui.list_items([option.display_label for option in scope_options])
+            while True:
+                raw = ui.prompt("输入 scope 列表，例如 KR1a,KR3j:")
+                if not raw:
+                    ui.warning("至少输入一个 scope。")
+                    continue
+                scopes = _parse_scopes_arg(raw)
+                invalid = [s for s in scopes if s not in available_scopes]
+                if invalid:
+                    ui.warning(f"以下 scope 不存在: {invalid}")
+                    continue
+                return scopes
+
+        if picked:
+            return picked
+
+        ui.warning("至少选择一个 scope。")
 
 
 def _parse_scopes_arg(scopes_arg: str | None) -> list[str]:
     if not scopes_arg:
         return []
-    return [s.strip() for s in scopes_arg.split(",") if s.strip()]
+    scopes: list[str] = []
+    for raw in scopes_arg.split(","):
+        scope = _normalize_scope_code(raw)
+        if scope and scope not in scopes:
+            scopes.append(scope)
+    return scopes
+
+
+def _parse_scope_dirs_arg(scope_dirs_arg: str | None) -> list[str]:
+    if not scope_dirs_arg:
+        return []
+    dirs: list[str] = []
+    for raw in scope_dirs_arg.split(","):
+        folder = _normalize_scope_code(raw)
+        if folder and folder not in dirs:
+            dirs.append(folder)
+    return dirs
+
+
+def _merge_unique(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for item in group:
+            if item not in merged:
+                merged.append(item)
+    return merged
+
+
+def _choose_manual_scope_dirs_interactive(available_scope_dirs: list[str], ui: CLIUI) -> list[str]:
+    ui.info("可选：补充输入具体目录（如 KR1a0001），将与上方勾选范围合并去重。")
+    available_set = set(available_scope_dirs)
+    while True:
+        raw = ui.prompt("输入目录列表（逗号分隔，留空跳过）:")
+        if not raw:
+            return []
+        dirs = _parse_scope_dirs_arg(raw)
+        invalid = [item for item in dirs if item not in available_set]
+        if invalid:
+            ui.warning(f"以下目录不存在: {invalid}")
+            continue
+        return dirs
 
 
 def _confirm(message: str, auto_yes: bool, ui: CLIUI) -> bool:
@@ -237,29 +318,56 @@ def main() -> int:
                 if not themes:
                     raise RuntimeError("阶段二无法继续：未从阶段一提取到 target_themes")
 
-                available_scopes = list_available_scopes(config.kanripo_dir)
-                if not available_scopes:
+                scope_options = list_available_scope_options(config.kanripo_dir)
+                available_scope_codes = [option.code for option in scope_options]
+                available_scope_dirs = list_available_scope_dirs(config.kanripo_dir)
+                if not available_scope_codes and not available_scope_dirs:
                     raise RuntimeError(f"未找到 Kanripo 数据目录: {config.kanripo_dir}")
+                valid_scope_inputs = sorted(set(_merge_unique(available_scope_codes, available_scope_dirs)))
+                valid_scope_inputs_set = set(valid_scope_inputs)
+                scope_display_map = {option.code: option.display_label for option in scope_options}
 
-                scopes = _parse_scopes_arg(args.scopes)
-                if not scopes:
-                    scopes = read_cached_scopes(project_dir, available_scopes)
+                scope_inputs = _merge_unique(
+                    _parse_scopes_arg(args.scopes),
+                    _parse_scope_dirs_arg(args.scope_dirs),
+                )
+                if not scope_inputs:
+                    scope_inputs = read_cached_scopes(project_dir, valid_scope_inputs)
 
-                if not scopes:
+                if not scope_inputs:
                     if args.yes:
-                        scopes = [available_scopes[0]]
-                        logger.info("--yes 模式下自动选择 scope: %s", scopes)
+                        if available_scope_codes:
+                            scope_inputs = [available_scope_codes[0]]
+                        else:
+                            scope_inputs = [available_scope_dirs[0]]
+                        logger.info(
+                            "--yes 模式下自动选择 scope: %s (%s)",
+                            scope_inputs[0],
+                            scope_display_map.get(scope_inputs[0], scope_inputs[0]),
+                        )
                     else:
-                        scopes = _choose_scopes_interactive(available_scopes, ui)
+                        if scope_options:
+                            chosen_scopes = _choose_scopes_interactive(scope_options, ui)
+                        else:
+                            ui.info("未找到 KR-Catalog 二级类目，仅支持手动输入具体目录。")
+                            chosen_scopes = []
+                        chosen_dirs = _choose_manual_scope_dirs_interactive(available_scope_dirs, ui)
+                        scope_inputs = _merge_unique(chosen_scopes, chosen_dirs)
 
-                invalid_scopes = [s for s in scopes if s not in available_scopes]
+                if not scope_inputs:
+                    raise RuntimeError("阶段二需要至少选择一个检索范围或具体目录。")
+
+                invalid_scopes = [item for item in scope_inputs if item not in valid_scope_inputs_set]
                 if invalid_scopes:
-                    raise RuntimeError(f"存在非法 scope: {invalid_scopes}")
+                    raise RuntimeError(f"存在非法 scope 或目录: {invalid_scopes}")
+                for scope in scope_inputs:
+                    display = scope_display_map.get(scope, f"自定义目录 [{scope}]")
+                    logger.info("阶段二检索范围: %s -> %s", scope, display)
 
                 run_stage2_data_collection(
                     project_dir=project_dir,
                     kanripo_dir=config.kanripo_dir,
-                    selected_scopes=scopes,
+                    selected_scopes=scope_inputs,
                     target_themes=themes,
                     llm_client=llm_client,
                     llm1_endpoint=config.stage2_llm1,

@@ -10,6 +10,7 @@ from core.utils import (
     markdown_front_matter,
     parse_json_from_text,
     parse_target_themes_from_proposal,
+    read_text,
     write_json,
     write_text,
 )
@@ -73,6 +74,63 @@ def _generate_target_themes(
     raise RuntimeError(f"阶段一失败：无法生成有效 target_themes。last_error={last_error}")
 
 
+def _compose_proposal(target_themes: list[dict[str, str]], sections: list[str]) -> str:
+    proposal = markdown_front_matter(target_themes)
+    if sections:
+        proposal += "\n\n" + "\n\n".join(sections)
+    return proposal + "\n"
+
+
+def _restore_completed_sections(
+    output_path: Path,
+    section_specs: list[tuple[str, str]],
+) -> list[str]:
+    if not output_path.exists():
+        return []
+
+    proposal = read_text(output_path)
+    expected_titles = {title for title, _instruction in section_specs}
+    section_blocks: dict[str, str] = {}
+    current_title: str | None = None
+    current_lines: list[str] = []
+
+    for line in proposal.splitlines():
+        heading = line.strip()
+        matched_title: str | None = None
+        if heading.startswith("## "):
+            candidate = heading[3:].strip()
+            if candidate in expected_titles:
+                matched_title = candidate
+
+        if matched_title is not None:
+            if current_title and current_title not in section_blocks:
+                block = "\n".join(current_lines).strip()
+                if block:
+                    section_blocks[current_title] = block
+            current_title = matched_title
+            current_lines = [line]
+            continue
+
+        if current_title is not None:
+            current_lines.append(line)
+
+    if current_title and current_title not in section_blocks:
+        block = "\n".join(current_lines).strip()
+        if block:
+            section_blocks[current_title] = block
+
+    completed: list[str] = []
+    for title, _instruction in section_specs:
+        block = section_blocks.get(title)
+        if not block:
+            break
+        lines = block.splitlines()
+        if len(lines) <= 1 or not "\n".join(lines[1:]).strip():
+            break
+        completed.append(block)
+    return completed
+
+
 def run_stage1_topic_selection(
     *,
     project_dir: Path,
@@ -84,20 +142,37 @@ def run_stage1_topic_selection(
 ) -> list[dict[str, str]]:
     output_path = project_dir / "1_research_proposal.md"
     meta_path = project_dir / "1_research_proposal_meta.json"
-
-    if output_path.exists() and not overwrite:
-        themes = parse_target_themes_from_proposal(output_path)
-        if themes:
-            logger.info("阶段一已存在，复用: %s", output_path)
-            return themes
-
-    target_themes = _generate_target_themes(llm_client, llm_config, idea, logger)
     section_prompt_spec = load_prompt("stage1_section_writer")
     section_specs = _load_section_specs(section_prompt_spec)
-    context = json.dumps(target_themes, ensure_ascii=False, indent=2)
-
+    section_total = len(section_specs)
+    target_themes: list[dict[str, str]] = []
     sections: list[str] = []
-    for title, instruction in section_specs:
+
+    if output_path.exists() and not overwrite:
+        target_themes = parse_target_themes_from_proposal(output_path)
+        if target_themes:
+            sections = _restore_completed_sections(output_path, section_specs)
+            if len(sections) == section_total:
+                logger.info("阶段一已存在，复用: %s", output_path)
+                return target_themes
+            logger.info(
+                "阶段一检测到部分草稿，将续写剩余小节: %s (completed=%s/%s)",
+                output_path,
+                len(sections),
+                section_total,
+            )
+        else:
+            logger.info("阶段一检测到旧文件但缺少 target_themes，将从头重写: %s", output_path)
+
+    if not target_themes:
+        target_themes = _generate_target_themes(llm_client, llm_config, idea, logger)
+        sections = []
+
+    context = json.dumps(target_themes, ensure_ascii=False, indent=2)
+    write_text(output_path, _compose_proposal(target_themes, sections))
+
+    for idx, (title, instruction) in enumerate(section_specs[len(sections) :], start=len(sections) + 1):
+        logger.info("阶段一小节生成中: %s/%s %s", idx, section_total, title)
         messages = build_messages(
             section_prompt_spec,
             idea=idea,
@@ -116,15 +191,17 @@ def run_stage1_topic_selection(
             raise RuntimeError(f"阶段一失败：小节 {title} 返回空内容。")
 
         sections.append(f"## {title}\n\n{content}")
+        write_text(output_path, _compose_proposal(target_themes, sections))
+        logger.info("阶段一小节已落盘: %s/%s %s -> %s", idx, section_total, title, output_path)
 
-    proposal = (
-        markdown_front_matter(target_themes)
-        + "\n\n"
-        + "\n\n".join(sections)
-        + "\n"
+    write_json(
+        meta_path,
+        {
+            "idea": idea,
+            "target_themes": target_themes,
+            "section_total": section_total,
+            "completed_sections": len(sections),
+        },
     )
-
-    write_text(output_path, proposal)
-    write_json(meta_path, {"idea": idea, "target_themes": target_themes})
     logger.info("阶段一完成: %s", output_path)
     return target_themes

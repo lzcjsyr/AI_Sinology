@@ -54,7 +54,8 @@ python3 -m pip install -r requirements.txt
 python3 main.py \
   --new-project demo_ming_study \
   --idea "研究晚明通俗小说中的商人形象" \
-  --scopes KR3j0160 \
+  --scopes KR3j \
+  --scope-dirs KR3j0160 \
   --max-fragments 8 \
   --stage2-concurrency 4 \
   --yes
@@ -76,6 +77,9 @@ python3 main.py --continue-project demo_ming_study
   - `expected_output`：模型返回格式说明
   - `prompt.system` / `prompt.user_template`：系统提示词与用户模板（变量缺失会直接报错终止）
 - 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并通过 `STAGE2_CONCURRENCY` 或 CLI 参数控制并发。
+- 阶段二检索范围来自 `data/kanripo_repos/KR-Catalog/KR/KR1.txt` 到 `KR4.txt` 的二级类目（如 `KR1a`、`KR3j`），CLI 展示格式为 `經部 [KR1a 易類]`。
+- 阶段二支持双通道输入：交互式多选类目（方向键+Enter 勾选/取消，底部“开始”按钮确认）和手动目录输入（如 `KR1a0001`），两者会自动合并并去重。
+- 交互式多选依赖 `prompt_toolkit`（已在 `requirements.txt` 中），若环境缺少依赖或非 TTY 终端，会自动降级为手动输入。
 - 阶段二使用 LiteLLM 调用 OpenAI 兼容 API，并支持高并发筛选。
 - 阶段二支持断点续传：`.cursor_llm1.json` 与 `.cursor_llm2.json`。
 - `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是按主题展开后的行级结果。

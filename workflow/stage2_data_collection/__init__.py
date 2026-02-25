@@ -10,6 +10,9 @@ from core.utils import ensure_dir, read_json, read_jsonl, write_json, write_text
 from workflow.stage2_data_collection.archival_arbitration import run_archival_arbitration
 from workflow.stage2_data_collection.archival_screening import run_archival_screening
 from workflow.stage2_data_collection.data_ingestion.parse_kanripo import (
+    ScopeOption,
+    list_available_scope_dirs,
+    list_available_scope_options,
     list_available_scopes,
     parse_kanripo_to_fragments,
 )
@@ -369,4 +372,11 @@ def run_stage2_data_collection(
     )
 
 
-__all__ = ["run_stage2_data_collection", "list_available_scopes", "read_cached_scopes"]
+__all__ = [
+    "ScopeOption",
+    "list_available_scope_dirs",
+    "list_available_scope_options",
+    "list_available_scopes",
+    "run_stage2_data_collection",
+    "read_cached_scopes",
+]
