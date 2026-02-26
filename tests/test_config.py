@@ -21,9 +21,11 @@ ENV_KEYS_TO_CLEAR = [
     "SILICONFLOW_API_KEY",
     "OPENROUTER_API_KEY",
     "VOLCENGINE_API_KEY",
+    "ALIYUN_API_KEY",
     "SILICONFLOW_BASE_URL",
     "OPENROUTER_BASE_URL",
     "VOLCENGINE_BASE_URL",
+    "ALIYUN_BASE_URL",
     "STAGE2_LLM1_CONCURRENCY",
     "STAGE2_LLM2_CONCURRENCY",
     "STAGE2_ARBITRATION_CONCURRENCY",
@@ -75,14 +77,15 @@ class AppConfigTests(unittest.TestCase):
             SILICONFLOW_API_KEY=sf_key
             OPENROUTER_API_KEY=or_key
             VOLCENGINE_API_KEY=ve_key
+            ALIYUN_API_KEY=aliyun_key
             """
         )
 
         self.assertEqual(config.stage1_llm.provider, "siliconflow")
-        self.assertEqual(config.stage2_llm1.provider, "volcengine")
+        self.assertEqual(config.stage2_llm1.provider, "aliyun")
         self.assertEqual(config.stage2_llm2.provider, "volcengine")
         self.assertEqual(config.stage2_llm3.provider, "volcengine")
-        self.assertEqual(config.stage2_llm1.api_key, "ve_key")
+        self.assertEqual(config.stage2_llm1.api_key, "aliyun_key")
         self.assertEqual(config.stage2_llm2.api_key, "ve_key")
         self.assertEqual(config.stage2_llm3.api_key, "ve_key")
         self.assertEqual(config.provider_base_urls["siliconflow"], "https://api.siliconflow.cn/v1")
@@ -91,14 +94,18 @@ class AppConfigTests(unittest.TestCase):
             config.provider_base_urls["volcengine"],
             "https://ark.cn-beijing.volces.com/api/v3",
         )
+        self.assertEqual(
+            config.provider_base_urls["aliyun"],
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
         self.assertIsNone(config.stage2_llm1_concurrency)
         self.assertIsNone(config.stage2_llm2_concurrency)
         self.assertIsNone(config.stage2_arbitration_concurrency)
         self.assertAlmostEqual(config.stage2_sync_headroom, 0.85)
         self.assertEqual(config.stage2_sync_max_ahead, 128)
         self.assertEqual(config.stage2_sync_mode, "lowest_shared")
-        self.assertEqual(config.stage2_llm1.rpm, 15000)
-        self.assertEqual(config.stage2_llm1.tpm, 1500000)
+        self.assertEqual(config.stage2_llm1.rpm, 30000)
+        self.assertEqual(config.stage2_llm1.tpm, 10000000)
         self.assertEqual(config.stage2_llm2.rpm, 30000)
         self.assertEqual(config.stage2_llm2.tpm, 5000000)
         self.assertEqual(config.stage2_fragment_max_attempts, 3)
@@ -122,6 +129,7 @@ class AppConfigTests(unittest.TestCase):
             SILICONFLOW_API_KEY=sf_key
             OPENROUTER_API_KEY=or_key
             VOLCENGINE_API_KEY=ve_key
+            ALIYUN_API_KEY=aliyun_key
             STAGE2_LLM1_CONCURRENCY=11
             STAGE2_LLM2_CONCURRENCY=13
             STAGE2_ARBITRATION_CONCURRENCY=7
@@ -154,6 +162,7 @@ class AppConfigTests(unittest.TestCase):
             SILICONFLOW_API_KEY=sf_key
             OPENROUTER_API_KEY=or_key
             VOLCENGINE_API_KEY=ve_key
+            ALIYUN_API_KEY=aliyun_key
             STAGE2_MAX_EMPTY_RETRIES=0
             """
         )

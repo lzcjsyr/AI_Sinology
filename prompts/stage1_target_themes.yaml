@@ -5,12 +5,6 @@ metadata:
 variables:
   idea: 用户输入的研究意向文本。
 
-expected_output:
-  format: json_object
-  required_fields:
-    - target_themes
-  target_themes_rule: target_themes 长度为 3-5，每项必须包含 theme 和 description。
-
 prompt:
   system: |
     你是中文学术研究选题顾问。

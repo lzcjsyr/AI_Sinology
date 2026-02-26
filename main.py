@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from core import AppConfig, LiteLLMClient, StateManager
@@ -195,11 +196,14 @@ def _parse_scope_dirs_arg(scope_dirs_arg: str | None) -> list[str]:
 
 
 def _merge_unique(*groups: list[str]) -> list[str]:
+    seen: set[str] = set()
     merged: list[str] = []
     for group in groups:
         for item in group:
-            if item not in merged:
-                merged.append(item)
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
     return merged
 
 
@@ -223,6 +227,92 @@ def _confirm(message: str, auto_yes: bool, ui: CLIUI) -> bool:
         return True
     answer = ui.prompt(f"{message} [y/N]:").lower()
     return answer in {"y", "yes"}
+
+
+@dataclass(frozen=True)
+class _Stage2Runtime:
+    max_fragments: int | None
+    llm1_concurrency: int | None
+    llm2_concurrency: int | None
+    arbitration_concurrency: int | None
+    sync_headroom: float
+    sync_max_ahead: int
+    fragment_max_attempts: int
+    max_empty_retries: int
+
+
+def _load_saved_idea(project_dir: Path) -> str:
+    meta_path = project_dir / "1_research_proposal_meta.json"
+    if not meta_path.exists():
+        return ""
+    try:
+        return str(read_json(meta_path).get("idea") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _resolve_stage2_runtime(args: argparse.Namespace, config: AppConfig) -> _Stage2Runtime:
+    llm1_concurrency = (
+        args.stage2_llm1_concurrency
+        if args.stage2_llm1_concurrency is not None
+        else config.stage2_llm1_concurrency
+    )
+    llm2_concurrency = (
+        args.stage2_llm2_concurrency
+        if args.stage2_llm2_concurrency is not None
+        else config.stage2_llm2_concurrency
+    )
+    arbitration_concurrency = (
+        args.stage2_arbitration_concurrency
+        if args.stage2_arbitration_concurrency is not None
+        else config.stage2_arbitration_concurrency
+    )
+    sync_headroom = (
+        args.stage2_sync_headroom
+        if args.stage2_sync_headroom is not None
+        else config.stage2_sync_headroom
+    )
+    sync_max_ahead = (
+        args.stage2_sync_max_ahead
+        if args.stage2_sync_max_ahead is not None
+        else config.stage2_sync_max_ahead
+    )
+    fragment_max_attempts = (
+        args.stage2_fragment_max_attempts
+        if args.stage2_fragment_max_attempts is not None
+        else config.stage2_fragment_max_attempts
+    )
+    max_empty_retries = (
+        args.stage2_max_empty_retries
+        if args.stage2_max_empty_retries is not None
+        else config.stage2_max_empty_retries
+    )
+
+    if llm1_concurrency is not None and llm1_concurrency < 1:
+        raise RuntimeError("阶段二 llm1 并发参数必须 >= 1。")
+    if llm2_concurrency is not None and llm2_concurrency < 1:
+        raise RuntimeError("阶段二 llm2 并发参数必须 >= 1。")
+    if arbitration_concurrency is not None and arbitration_concurrency < 1:
+        raise RuntimeError("阶段二仲裁并发参数必须 >= 1。")
+    if not 0.01 <= float(sync_headroom) <= 1.0:
+        raise RuntimeError("阶段二同速 headroom 必须在 [0.01, 1.0]。")
+    if sync_max_ahead < 0:
+        raise RuntimeError("阶段二同速 max_ahead 必须 >= 0。")
+
+    return _Stage2Runtime(
+        max_fragments=(
+            args.max_fragments
+            if args.max_fragments is not None
+            else config.default_max_fragments
+        ),
+        llm1_concurrency=llm1_concurrency,
+        llm2_concurrency=llm2_concurrency,
+        arbitration_concurrency=arbitration_concurrency,
+        sync_headroom=sync_headroom,
+        sync_max_ahead=sync_max_ahead,
+        fragment_max_attempts=fragment_max_attempts,
+        max_empty_retries=max_empty_retries,
+    )
 
 
 def _show_project_progress(project_name: str, stage_progress: list[StageProgress], ui: CLIUI) -> None:
@@ -362,12 +452,7 @@ def main() -> int:
         project_dir = state.project_dir
         if not is_new and rerun_requested:
             if start_stage == 1 and not args.idea:
-                meta_path = project_dir / "1_research_proposal_meta.json"
-                if meta_path.exists():
-                    try:
-                        args.idea = str(read_json(meta_path).get("idea") or "")
-                    except Exception:  # noqa: BLE001
-                        args.idea = args.idea
+                args.idea = _load_saved_idea(project_dir)
 
             stale_artifacts = state_manager.collect_artifacts_from_stage(project_dir, start_stage)
             if stale_artifacts:
@@ -402,57 +487,7 @@ def main() -> int:
             ui.error("缺少 1_research_proposal.md，无法从当前阶段继续。")
             return 1
 
-        max_fragments = (
-            args.max_fragments
-            if args.max_fragments is not None
-            else config.default_max_fragments
-        )
-        stage2_llm1_concurrency = (
-            args.stage2_llm1_concurrency
-            if args.stage2_llm1_concurrency is not None
-            else config.stage2_llm1_concurrency
-        )
-        stage2_llm2_concurrency = (
-            args.stage2_llm2_concurrency
-            if args.stage2_llm2_concurrency is not None
-            else config.stage2_llm2_concurrency
-        )
-
-        stage2_arbitration_concurrency = (
-            args.stage2_arbitration_concurrency
-            if args.stage2_arbitration_concurrency is not None
-            else config.stage2_arbitration_concurrency
-        )
-        stage2_sync_headroom = (
-            args.stage2_sync_headroom
-            if args.stage2_sync_headroom is not None
-            else config.stage2_sync_headroom
-        )
-        stage2_sync_max_ahead = (
-            args.stage2_sync_max_ahead
-            if args.stage2_sync_max_ahead is not None
-            else config.stage2_sync_max_ahead
-        )
-        if stage2_llm1_concurrency is not None and stage2_llm1_concurrency < 1:
-            raise RuntimeError("阶段二 llm1 并发参数必须 >= 1。")
-        if stage2_llm2_concurrency is not None and stage2_llm2_concurrency < 1:
-            raise RuntimeError("阶段二 llm2 并发参数必须 >= 1。")
-        if stage2_arbitration_concurrency is not None and stage2_arbitration_concurrency < 1:
-            raise RuntimeError("阶段二仲裁并发参数必须 >= 1。")
-        if not 0.01 <= float(stage2_sync_headroom) <= 1.0:
-            raise RuntimeError("阶段二同速 headroom 必须在 [0.01, 1.0]。")
-        if stage2_sync_max_ahead < 0:
-            raise RuntimeError("阶段二同速 max_ahead 必须 >= 0。")
-        stage2_fragment_max_attempts = (
-            args.stage2_fragment_max_attempts
-            if args.stage2_fragment_max_attempts is not None
-            else config.stage2_fragment_max_attempts
-        )
-        stage2_max_empty_retries = (
-            args.stage2_max_empty_retries
-            if args.stage2_max_empty_retries is not None
-            else config.stage2_max_empty_retries
-        )
+        stage2_runtime = _resolve_stage2_runtime(args, config)
 
         for stage in range(start_stage, end_stage + 1):
             stage_name = state_manager.stage_name(stage)
@@ -461,11 +496,8 @@ def main() -> int:
 
             if stage == 1:
                 idea = args.idea
-                if not idea and (project_dir / "1_research_proposal_meta.json").exists():
-                    try:
-                        idea = str(read_json(project_dir / "1_research_proposal_meta.json").get("idea") or "")
-                    except Exception:  # noqa: BLE001
-                        idea = ""
+                if not idea:
+                    idea = _load_saved_idea(project_dir)
                 if not idea:
                     idea = ui.prompt("请输入研究意向:")
                 if not idea:
@@ -541,15 +573,15 @@ def main() -> int:
                     llm2_endpoint=config.stage2_llm2,
                     llm3_endpoint=config.stage2_llm3,
                     logger=logger,
-                    max_fragments=max_fragments,
-                    max_empty_retries=stage2_max_empty_retries,
-                    llm1_concurrency=stage2_llm1_concurrency,
-                    llm2_concurrency=stage2_llm2_concurrency,
-                    arbitration_concurrency=stage2_arbitration_concurrency,
-                    sync_headroom=stage2_sync_headroom,
-                    sync_max_ahead=stage2_sync_max_ahead,
+                    max_fragments=stage2_runtime.max_fragments,
+                    max_empty_retries=stage2_runtime.max_empty_retries,
+                    llm1_concurrency=stage2_runtime.llm1_concurrency,
+                    llm2_concurrency=stage2_runtime.llm2_concurrency,
+                    arbitration_concurrency=stage2_runtime.arbitration_concurrency,
+                    sync_headroom=stage2_runtime.sync_headroom,
+                    sync_max_ahead=stage2_runtime.sync_max_ahead,
                     sync_mode=config.stage2_sync_mode,
-                    fragment_max_attempts=stage2_fragment_max_attempts,
+                    fragment_max_attempts=stage2_runtime.fragment_max_attempts,
                     retry_backoff_seconds=config.retry_backoff_seconds,
                 )
 

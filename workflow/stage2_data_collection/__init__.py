@@ -267,9 +267,8 @@ def run_stage2_data_collection(
             if not fragments_path.exists():
                 raise RuntimeError("阶段二断点续传失败：缺少 fragments 文件")
         else:
-            if attempt > 1:
-                if current_limit is not None:
-                    current_limit = current_limit * 2
+            if attempt > 1 and current_limit is not None:
+                current_limit = current_limit * 2
             logger.info("阶段二尝试 #%s，max_fragments=%s", attempt, current_limit)
             _reset_stage2_artifacts(project_dir)
             fragments_path = parse_kanripo_to_fragments(

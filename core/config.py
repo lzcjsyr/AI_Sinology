@@ -31,12 +31,13 @@ def _load_dotenv(dotenv_path: Path) -> dict[str, str]:
 # 说明：
 # 1) 这里负责“各阶段用哪个 provider + 哪个 model”。
 # 2) API Key 不写在这里，而写在 .env（见 .env.example）。
-# 3) 三个 provider 的默认 base_url 已内置，可按需改成私有网关。
+# 3) provider 的默认 base_url 已内置，可按需改成私有网关。
 #
 PROVIDER_DEFAULT_BASE_URLS: dict[str, str] = {
     "siliconflow": "https://api.siliconflow.cn/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
+    "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 }
 
 PIPELINE_LLM_CONFIG: dict[str, dict[str, Any]] = {
@@ -47,10 +48,10 @@ PIPELINE_LLM_CONFIG: dict[str, dict[str, Any]] = {
         "tpm": 100000,
     },
     "stage2_llm1": {
-        "provider": "volcengine",
-        "model": "deepseek-v3-2-251201",
-        "rpm": 15000,
-        "tpm": 1500000,
+        "provider": "aliyun",
+        "model": "qwen3.5-flash",
+        "rpm": 30000,
+        "tpm": 10000000,
     },
     "stage2_llm2": {
         "provider": "volcengine",
@@ -123,6 +124,7 @@ PROVIDER_API_KEY_ENV_NAMES: dict[str, str] = {
     "siliconflow": "SILICONFLOW_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "volcengine": "VOLCENGINE_API_KEY",
+    "aliyun": "ALIYUN_API_KEY",
 }
 
 STAGE_MODEL_ENV_OVERRIDES: dict[str, str] = {
@@ -199,6 +201,10 @@ def _normalize_provider(name: str) -> str:
         "volcengine-ark": "volcengine",
         "ark": "volcengine",
         "火山引擎": "volcengine",
+        "dashscope": "aliyun",
+        "alibaba": "aliyun",
+        "aliyun-dashscope": "aliyun",
+        "阿里云": "aliyun",
     }
     return aliases.get(provider, provider)
 

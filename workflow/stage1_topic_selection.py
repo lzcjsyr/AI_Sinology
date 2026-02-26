@@ -24,12 +24,13 @@ def _load_section_specs(spec: PromptSpec) -> list[tuple[str, str]]:
     sections: list[tuple[str, str]] = []
     for idx, item in enumerate(raw_sections, start=1):
         if not isinstance(item, dict):
-            raise RuntimeError(f"提示词 `{spec.prompt_id}` 的 sections[{idx}] 不是对象")
-        title = str(item.get("section") or "").strip()
-        instruction = str(item.get("goal") or "").strip()
+            raise RuntimeError(f"提示词 `{spec.prompt_id}` 的 section_plan[{idx}] 不是对象")
+        title = str(item.get("section_title") or "").strip()
+        instruction = str(item.get("section_instruction") or "").strip()
         if not title or not instruction:
             raise RuntimeError(
-                f"提示词 `{spec.prompt_id}` 的 sections[{idx}] 缺少 section/goal"
+                f"提示词 `{spec.prompt_id}` 的 section_plan[{idx}] 缺少 "
+                "section_title/section_instruction"
             )
         sections.append((title, instruction))
     return sections
@@ -72,6 +73,14 @@ def _generate_target_themes(
             logger.warning("生成 target_themes 失败，attempt=%s error=%s", attempt, e)
 
     raise RuntimeError(f"阶段一失败：无法生成有效 target_themes。last_error={last_error}")
+
+
+def _parse_section_content(response_content: str, section_title: str) -> str:
+    payload = parse_json_from_text(response_content)
+    content = str(payload.get("section_content") or "").strip()
+    if not content:
+        raise ValueError(f"section_content 为空: {section_title}")
+    return content
 
 
 def _compose_proposal(target_themes: list[dict[str, str]], sections: list[str]) -> str:
@@ -186,9 +195,10 @@ def run_stage1_topic_selection(
             temperature=0.4,
             **llm_config.as_client_kwargs(),
         )
-        content = response.content.strip()
-        if not content:
-            raise RuntimeError(f"阶段一失败：小节 {title} 返回空内容。")
+        try:
+            content = _parse_section_content(response.content, title)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"阶段一失败：小节 {title} 返回格式错误。error={exc}") from exc
 
         sections.append(f"## {title}\n\n{content}")
         write_text(output_path, _compose_proposal(target_themes, sections))

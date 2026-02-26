@@ -7,13 +7,6 @@ variables:
   context: 前文内容（即阶段一产出的目标主题结构化结果）。
   corpus_summary: 可用证据列表（含 piece_id）。
 
-expected_output:
-  format: json_object
-  required_fields:
-    - thesis_statement
-    - chapters
-  rule: evidence_anchors 只能引用给定 piece_id。
-
 prompt:
   system: |
     你是学术论证架构师。

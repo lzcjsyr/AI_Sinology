@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
@@ -25,7 +24,6 @@ def _generate_sub_section_analysis(
     subsection_title: str,
     subsection_argument: str,
     evidence: list[dict[str, str]],
-    logger,
 ) -> dict[str, str]:
     evidence_preview = []
     for item in evidence:
@@ -135,7 +133,6 @@ def run_stage4_drafting(
                     subsection_title=sub_title,
                     subsection_argument=sub_argument,
                     evidence=evidence_items,
-                    logger=logger,
                 )
 
                 lines.append(f"#### {sub_title}")

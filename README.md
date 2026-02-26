@@ -15,7 +15,7 @@
 ```python
 PIPELINE_LLM_CONFIG = {
     "stage1": {"provider": "siliconflow", "model": "..."},
-    "stage2_llm1": {"provider": "siliconflow", "model": "..."},
+    "stage2_llm1": {"provider": "aliyun", "model": "qwen3.5-flash"},
     "stage2_llm2": {"provider": "volcengine", "model": "doubao-seed-2-0-mini-260215"},
     "stage2_llm3": {"provider": "volcengine", "model": "..."},
     "stage3": {"provider": "siliconflow", "model": "..."},
@@ -31,6 +31,7 @@ PROVIDER_DEFAULT_BASE_URLS = {
     "siliconflow": "https://api.siliconflow.cn/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
+    "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 }
 ```
 
@@ -40,6 +41,7 @@ PROVIDER_DEFAULT_BASE_URLS = {
 SILICONFLOW_API_KEY=...
 OPENROUTER_API_KEY=...
 VOLCENGINE_API_KEY=...
+ALIYUN_API_KEY=...
 ```
 
 3. 安装依赖：
@@ -75,7 +77,6 @@ python3 main.py --continue-project demo_ming_study
   - `metadata.step`：步骤标识
   - `metadata.purpose`：步骤用途说明
   - `variables`：本步骤需要的输入变量说明
-  - `expected_output`：模型返回格式说明
   - `prompt.system` / `prompt.user_template`：系统提示词与用户模板（变量缺失会直接报错终止）
 - 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并在同一处配置该模型的 `rpm/tpm`（见 `core/config.py` 的 `PIPELINE_LLM_CONFIG`）。
 - 阶段二并发支持手工覆盖，也支持自动推导（推荐自动）：
@@ -84,7 +85,7 @@ python3 main.py --continue-project demo_ming_study
 - 当并发参数留空时，系统会根据该模型的 `rpm/tpm` 与请求 token 估算自动计算并发。
 - 阶段二支持“同速并发”控制：`STAGE2_SYNC_HEADROOM`、`STAGE2_SYNC_MAX_AHEAD`（CLI 对应 `--stage2-sync-headroom`、`--stage2-sync-max-ahead`）。
 - 阶段二仲裁支持并发：`STAGE2_ARBITRATION_CONCURRENCY` / `--stage2-arbitration-concurrency`。
-- 阶段二支持按模型覆盖 RPM/TPM（默认：llm1=1000/100000，llm2=30000/5000000，llm3=1000/100000）：
+- 阶段二支持按模型覆盖 RPM/TPM（默认：llm1=30000/10000000，llm2=30000/5000000，llm3=30000/5000000）：
   - `STAGE2_LLM1_RPM` / `STAGE2_LLM1_TPM`
   - `STAGE2_LLM2_RPM` / `STAGE2_LLM2_TPM`
   - `STAGE2_LLM3_RPM` / `STAGE2_LLM3_TPM`
@@ -96,4 +97,5 @@ python3 main.py --continue-project demo_ming_study
 - `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是按主题展开后的行级结果。
   - 同一个 `piece_id` 会出现 N 次（N=目标主题数），这是“单次阅读、多主题判定”的展开结构，不是重复阅读。
 - 阶段二日志统一写入 `2_stage_manifest.json`（包含所选 scopes、状态、重试信息和 `screening_audit`）。
+- 阶段五采用逐段润色（默认按 `####` 小节切片），每完成一段立即回写 `5_final_manuscript.md`，并记录 `5_polish_progress.json` 以支持中断续跑。
 - 产物按项目隔离存放在 `outputs/<project_name>/`。

@@ -14,7 +14,6 @@ class PromptSpec:
     file_path: Path
     purpose: str
     variables: dict[str, Any]
-    expected_output: dict[str, Any]
     system_prompt: str
     user_template: str
     raw: dict[str, Any]
@@ -29,18 +28,6 @@ def _require_non_empty_string(value: Any, *, field: str, file_path: Path) -> str
         raise RuntimeError(f"提示词文件 `{file_path}` 缺少必填字符串字段: `{field}`")
     return value.strip()
 
-
-def _validate_prompt_block(prompt: dict[str, Any], *, file_path: Path) -> None:
-    _require_non_empty_string(
-        prompt.get("system"),
-        field="prompt.system",
-        file_path=file_path,
-    )
-    _require_non_empty_string(
-        prompt.get("user_template"),
-        field="prompt.user_template",
-        file_path=file_path,
-    )
 
 def load_prompt(prompt_id: str, prompts_dir: Path | None = None) -> PromptSpec:
     if not prompt_id.strip():
@@ -79,14 +66,9 @@ def load_prompt(prompt_id: str, prompts_dir: Path | None = None) -> PromptSpec:
     if not isinstance(variables, dict) or not variables:
         raise RuntimeError(f"提示词文件缺少 `variables` 对象: {file_path}")
 
-    expected_output = payload.get("expected_output")
-    if not isinstance(expected_output, dict) or not expected_output:
-        raise RuntimeError(f"提示词文件缺少 `expected_output` 对象: {file_path}")
-
     prompt = payload.get("prompt")
     if not isinstance(prompt, dict):
         raise RuntimeError(f"提示词文件缺少 `prompt` 对象: {file_path}")
-    _validate_prompt_block(prompt, file_path=file_path)
 
     system_prompt = _require_non_empty_string(
         prompt.get("system"),
@@ -104,7 +86,6 @@ def load_prompt(prompt_id: str, prompts_dir: Path | None = None) -> PromptSpec:
         file_path=file_path,
         purpose=purpose,
         variables=variables,
-        expected_output=expected_output,
         system_prompt=system_prompt,
         user_template=user_template,
         raw=payload,

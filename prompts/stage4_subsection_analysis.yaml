@@ -7,14 +7,6 @@ variables:
   subsection_argument: 小节论点。
   evidence_preview: 该小节可用证据摘要。
 
-expected_output:
-  format: json_object
-  required_fields:
-    - topic_sentence
-    - analysis
-    - mini_conclusion
-  rule: analysis 必须基于给定证据，不得杜撰史料。
-
 prompt:
   system: |
     你是学术论文写作助手。

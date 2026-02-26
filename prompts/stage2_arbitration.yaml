@@ -9,14 +9,6 @@ variables:
   llm1_result_json: LLM1 判定 JSON。
   llm2_result_json: LLM2 判定 JSON。
 
-expected_output:
-  format: json_object
-  required_fields:
-    - is_relevant
-    - reason
-    - relevance_level
-  rule: 若 is_relevant=false，则 reason 和 relevance_level 必须为 null。
-
 prompt:
   system: |
     你是严谨的学术仲裁助手。

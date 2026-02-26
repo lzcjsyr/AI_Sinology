@@ -37,7 +37,7 @@ STAGE_IN_PROGRESS_ARTIFACTS = {
     ],
     3: ["3_outline_matrix.json"],
     4: [],
-    5: ["5_final_manuscript.md", "5_revision_checklist.md"],
+    5: ["5_polish_progress.json", "5_final_manuscript.md", "5_revision_checklist.md"],
 }
 
 STAGE_RESET_ARTIFACTS = {
@@ -61,7 +61,12 @@ STAGE_RESET_ARTIFACTS = {
     ],
     3: ["3_outline_matrix.yaml", "3_outline_matrix.json"],
     4: ["4_first_draft.md"],
-    5: ["5_final_manuscript.md", "5_revision_checklist.md", "5_final_manuscript.docx"],
+    5: [
+        "5_polish_progress.json",
+        "5_final_manuscript.md",
+        "5_revision_checklist.md",
+        "5_final_manuscript.docx",
+    ],
 }
 
 STAGE_NAMES = {

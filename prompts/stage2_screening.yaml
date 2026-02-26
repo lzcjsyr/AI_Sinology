@@ -8,12 +8,6 @@ variables:
   source_file: 来源文件名。
   original_text: 史料原文。
 
-expected_output:
-  format: json_object
-  required_fields:
-    - matches
-  matches_rule: 每个主题必须对应一条记录，字段为 theme_id/theme/is_relevant/reason/relevance_level。
-
 prompt:
   system: |
     你是严谨的结构化信息抽取器。
