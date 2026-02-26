@@ -11,9 +11,6 @@ from core.config import AppConfig, PIPELINE_LLM_CONFIG
 
 
 ENV_KEYS_TO_CLEAR = [
-    "API_KEY",
-    "BASE_URL",
-    "MODEL",
     "MODEL_STAGE1",
     "MODEL_STAGE3",
     "MODEL_STAGE4",
@@ -27,7 +24,6 @@ ENV_KEYS_TO_CLEAR = [
     "SILICONFLOW_BASE_URL",
     "OPENROUTER_BASE_URL",
     "VOLCENGINE_BASE_URL",
-    "STAGE2_CONCURRENCY",
     "STAGE2_LLM1_CONCURRENCY",
     "STAGE2_LLM2_CONCURRENCY",
     "STAGE2_ARBITRATION_CONCURRENCY",
@@ -50,12 +46,6 @@ ENV_KEYS_TO_CLEAR = [
     "STAGE2_SYNC_MODE",
     "STAGE2_FRAGMENT_MAX_ATTEMPTS",
     "STAGE2_MAX_EMPTY_RETRIES",
-    "STAGE2_SILICONFLOW_RPM",
-    "STAGE2_SILICONFLOW_TPM",
-    "STAGE2_VOLCENGINE_RPM",
-    "STAGE2_VOLCENGINE_TPM",
-    "STAGE2_OPENROUTER_RPM",
-    "STAGE2_OPENROUTER_TPM",
 ]
 
 
@@ -89,27 +79,26 @@ class AppConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(config.stage1_llm.provider, "siliconflow")
-        self.assertEqual(config.stage2_llm1.provider, "siliconflow")
+        self.assertEqual(config.stage2_llm1.provider, "volcengine")
         self.assertEqual(config.stage2_llm2.provider, "volcengine")
-        self.assertEqual(config.stage2_llm3.provider, "siliconflow")
-        self.assertEqual(config.stage2_llm1.api_key, "sf_key")
+        self.assertEqual(config.stage2_llm3.provider, "volcengine")
+        self.assertEqual(config.stage2_llm1.api_key, "ve_key")
         self.assertEqual(config.stage2_llm2.api_key, "ve_key")
-        self.assertEqual(config.stage2_llm3.api_key, "sf_key")
+        self.assertEqual(config.stage2_llm3.api_key, "ve_key")
         self.assertEqual(config.provider_base_urls["siliconflow"], "https://api.siliconflow.cn/v1")
         self.assertEqual(config.provider_base_urls["openrouter"], "https://openrouter.ai/api/v1")
         self.assertEqual(
             config.provider_base_urls["volcengine"],
             "https://ark.cn-beijing.volces.com/api/v3",
         )
-        self.assertIsNone(config.stage2_screening_concurrency)
         self.assertIsNone(config.stage2_llm1_concurrency)
         self.assertIsNone(config.stage2_llm2_concurrency)
         self.assertIsNone(config.stage2_arbitration_concurrency)
         self.assertAlmostEqual(config.stage2_sync_headroom, 0.85)
         self.assertEqual(config.stage2_sync_max_ahead, 128)
         self.assertEqual(config.stage2_sync_mode, "lowest_shared")
-        self.assertEqual(config.stage2_llm1.rpm, 1000)
-        self.assertEqual(config.stage2_llm1.tpm, 100000)
+        self.assertEqual(config.stage2_llm1.rpm, 15000)
+        self.assertEqual(config.stage2_llm1.tpm, 1500000)
         self.assertEqual(config.stage2_llm2.rpm, 30000)
         self.assertEqual(config.stage2_llm2.tpm, 5000000)
         self.assertEqual(config.stage2_fragment_max_attempts, 3)
@@ -127,24 +116,12 @@ class AppConfigTests(unittest.TestCase):
         self.assertIn("stage1", msg)
         self.assertIn("SILICONFLOW_API_KEY", msg)
 
-    def test_legacy_api_key_fallback_allows_validation(self) -> None:
-        config = self._load_with_env_file(
-            """
-            API_KEY=legacy_shared_key
-            """
-        )
-        config.validate_api()
-        self.assertEqual(config.stage2_llm1.api_key, "legacy_shared_key")
-        self.assertEqual(config.stage2_llm2.api_key, "legacy_shared_key")
-        self.assertEqual(config.stage2_llm3.api_key, "legacy_shared_key")
-
     def test_stage2_runtime_values_can_be_overridden(self) -> None:
         config = self._load_with_env_file(
             """
             SILICONFLOW_API_KEY=sf_key
             OPENROUTER_API_KEY=or_key
             VOLCENGINE_API_KEY=ve_key
-            STAGE2_CONCURRENCY=9
             STAGE2_LLM1_CONCURRENCY=11
             STAGE2_LLM2_CONCURRENCY=13
             STAGE2_ARBITRATION_CONCURRENCY=7
@@ -159,7 +136,6 @@ class AppConfigTests(unittest.TestCase):
             """
         )
 
-        self.assertEqual(config.stage2_screening_concurrency, 9)
         self.assertEqual(config.stage2_llm1_concurrency, 11)
         self.assertEqual(config.stage2_llm2_concurrency, 13)
         self.assertEqual(config.stage2_arbitration_concurrency, 7)
@@ -182,34 +158,6 @@ class AppConfigTests(unittest.TestCase):
             """
         )
         self.assertEqual(config.stage2_max_empty_retries, 0)
-
-    def test_stage2_llm_concurrency_falls_back_to_legacy_concurrency(self) -> None:
-        config = self._load_with_env_file(
-            """
-            SILICONFLOW_API_KEY=sf_key
-            VOLCENGINE_API_KEY=ve_key
-            STAGE2_CONCURRENCY=6
-            """
-        )
-        self.assertEqual(config.stage2_screening_concurrency, 6)
-        self.assertEqual(config.stage2_llm1_concurrency, 6)
-        self.assertEqual(config.stage2_llm2_concurrency, 6)
-
-    def test_stage2_model_limit_falls_back_to_legacy_provider_limit_env(self) -> None:
-        config = self._load_with_env_file(
-            """
-            SILICONFLOW_API_KEY=sf_key
-            VOLCENGINE_API_KEY=ve_key
-            STAGE2_SILICONFLOW_RPM=1234
-            STAGE2_SILICONFLOW_TPM=567890
-            STAGE2_VOLCENGINE_RPM=33333
-            STAGE2_VOLCENGINE_TPM=4444444
-            """
-        )
-        self.assertEqual(config.stage2_llm1.rpm, 1234)
-        self.assertEqual(config.stage2_llm1.tpm, 567890)
-        self.assertEqual(config.stage2_llm2.rpm, 33333)
-        self.assertEqual(config.stage2_llm2.tpm, 4444444)
 
     def test_missing_stage_rate_limit_in_pipeline_config_raises(self) -> None:
         with patch.dict(

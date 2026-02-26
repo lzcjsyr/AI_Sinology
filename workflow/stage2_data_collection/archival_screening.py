@@ -687,7 +687,6 @@ async def run_archival_screening(
     sync_mode: str = "lowest_shared",
     fragment_max_attempts: int = 3,
     retry_backoff_seconds: float = 2.0,
-    concurrency_per_model: int | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     _theme_names(target_themes)
     prompt_spec = load_prompt("stage2_screening")
@@ -696,9 +695,6 @@ async def run_archival_screening(
     if not fragments:
         raise RuntimeError(f"阶段2.2无法继续：未找到可筛选碎片 {fragments_path}")
 
-    if concurrency_per_model is not None:
-        llm1_concurrency = concurrency_per_model
-        llm2_concurrency = concurrency_per_model
     if llm1_concurrency is not None and llm1_concurrency < 1:
         raise RuntimeError("阶段2.2参数 llm1_concurrency 必须 >= 1")
     if llm2_concurrency is not None and llm2_concurrency < 1:

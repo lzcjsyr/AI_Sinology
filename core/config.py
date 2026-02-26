@@ -47,22 +47,22 @@ PIPELINE_LLM_CONFIG: dict[str, dict[str, Any]] = {
         "tpm": 100000,
     },
     "stage2_llm1": {
-        "provider": "siliconflow",
-        "model": "deepseek-ai/DeepSeek-V3.2",
-        "rpm": 1000,
-        "tpm": 100000,
+        "provider": "volcengine",
+        "model": "deepseek-v3-2-251201",
+        "rpm": 15000,
+        "tpm": 1500000,
     },
     "stage2_llm2": {
         "provider": "volcengine",
-        "model": "doubao-seed-2-0-mini-260215",
+        "model": "doubao-seed-2-0-lite-260215",
         "rpm": 30000,
         "tpm": 5000000,
     },
     "stage2_llm3": {
-        "provider": "siliconflow",
-        "model": "deepseek-ai/DeepSeek-V3.2",
-        "rpm": 1000,
-        "tpm": 100000,
+        "provider": "volcengine",
+        "model": "doubao-seed-2-0-pro-260215",
+        "rpm": 30000,
+        "tpm": 5000000,
     },
     "stage3": {
         "provider": "siliconflow",
@@ -86,9 +86,6 @@ PIPELINE_LLM_CONFIG: dict[str, dict[str, Any]] = {
 
 STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     # ---------------- 2.2 阶段：并发与资源控制 ----------------
-    # 兼容旧参数：当设置 STAGE2_CONCURRENCY 时，同时作用于 llm1/llm2；
-    # 留空表示按模型 rpm/tpm 自动计算并发。
-    "screening_concurrency": None,
     # LLM1 在 2.2 阶段执行片段筛选时的并发请求数；留空表示自动计算。
     "llm1_concurrency": None,
     # LLM2 在 2.2 阶段执行片段筛选时的并发请求数；留空表示自动计算。
@@ -146,12 +143,6 @@ STAGE_RATE_LIMIT_ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "stage3": ("STAGE3_RPM", "STAGE3_TPM"),
     "stage4": ("STAGE4_RPM", "STAGE4_TPM"),
     "stage5": ("STAGE5_RPM", "STAGE5_TPM"),
-}
-
-LEGACY_STAGE2_PROVIDER_RATE_LIMIT_ENV: dict[str, tuple[str, str]] = {
-    "siliconflow": ("STAGE2_SILICONFLOW_RPM", "STAGE2_SILICONFLOW_TPM"),
-    "volcengine": ("STAGE2_VOLCENGINE_RPM", "STAGE2_VOLCENGINE_TPM"),
-    "openrouter": ("STAGE2_OPENROUTER_RPM", "STAGE2_OPENROUTER_TPM"),
 }
 
 
@@ -218,8 +209,6 @@ def _build_stage_endpoint(
     pick,
     provider_base_urls: dict[str, str],
     provider_api_keys: dict[str, str],
-    fallback_model: str,
-    legacy_api_key: str,
 ) -> LLMEndpointConfig:
     spec: dict[str, Any] = dict(PIPELINE_LLM_CONFIG.get(stage) or {})
 
@@ -228,7 +217,9 @@ def _build_stage_endpoint(
         available = ", ".join(sorted(provider_base_urls.keys()))
         raise ValueError(f"阶段 `{stage}` 的 provider 无效: `{provider}`。可选: {available}")
 
-    default_model = str(spec.get("model") or fallback_model).strip() or fallback_model
+    default_model = str(spec.get("model") or "").strip()
+    if not default_model:
+        raise ValueError(f"阶段 `{stage}` 缺少 `model` 配置。")
     model_override_env = STAGE_MODEL_ENV_OVERRIDES.get(stage)
     model = pick(model_override_env, default_model) if model_override_env else default_model
     model = (model or default_model).strip()
@@ -244,14 +235,6 @@ def _build_stage_endpoint(
     stage_rate_env = STAGE_RATE_LIMIT_ENV_OVERRIDES.get(stage)
     rpm_raw: str | None = pick(stage_rate_env[0]) if stage_rate_env else None
     tpm_raw: str | None = pick(stage_rate_env[1]) if stage_rate_env else None
-    if stage.startswith("stage2"):
-        legacy_env = LEGACY_STAGE2_PROVIDER_RATE_LIMIT_ENV.get(provider)
-        if legacy_env:
-            if rpm_raw is None:
-                rpm_raw = pick(legacy_env[0])
-            if tpm_raw is None:
-                tpm_raw = pick(legacy_env[1])
-
     rpm = _as_int_with_min(rpm_raw, default_rpm, 1)
     tpm = _as_int_with_min(tpm_raw, default_tpm, 1)
 
@@ -260,7 +243,7 @@ def _build_stage_endpoint(
         provider=provider,
         model=model,
         base_url=provider_base_urls[provider],
-        api_key=provider_api_keys.get(provider) or legacy_api_key,
+        api_key=provider_api_keys.get(provider) or "",
         rpm=rpm,
         tpm=tpm,
     )
@@ -288,7 +271,6 @@ class AppConfig:
     stage3_llm: LLMEndpointConfig
     stage4_llm: LLMEndpointConfig
     stage5_llm: LLMEndpointConfig
-    stage2_screening_concurrency: int | None
     stage2_llm1_concurrency: int | None
     stage2_llm2_concurrency: int | None
     stage2_arbitration_concurrency: int | None
@@ -305,11 +287,6 @@ class AppConfig:
         def pick(name: str, default: Optional[str] = None) -> Optional[str]:
             return os.getenv(name) or env_file_values.get(name) or default
 
-        legacy_api_key = pick("API_KEY", "")
-        model_default = pick("MODEL", PIPELINE_LLM_CONFIG["stage1"]["model"]) or PIPELINE_LLM_CONFIG[
-            "stage1"
-        ]["model"]
-
         provider_base_urls = {
             provider: (
                 pick(f"{provider.upper()}_BASE_URL", default_url) or default_url
@@ -320,11 +297,6 @@ class AppConfig:
             provider: pick(env_name, "") or ""
             for provider, env_name in PROVIDER_API_KEY_ENV_NAMES.items()
         }
-
-        legacy_base_url = (
-            pick("BASE_URL", provider_base_urls[PIPELINE_LLM_CONFIG["stage1"]["provider"]])
-            or provider_base_urls[PIPELINE_LLM_CONFIG["stage1"]["provider"]]
-        ).rstrip("/")
 
         raw_limit = pick("MAX_FRAGMENTS", "")
         if raw_limit:
@@ -340,62 +312,44 @@ class AppConfig:
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
         stage2_llm1 = _build_stage_endpoint(
             stage="stage2_llm1",
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
         stage2_llm2 = _build_stage_endpoint(
             stage="stage2_llm2",
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
         stage2_llm3 = _build_stage_endpoint(
             stage="stage2_llm3",
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
         stage3_llm = _build_stage_endpoint(
             stage="stage3",
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
         stage4_llm = _build_stage_endpoint(
             stage="stage4",
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
         stage5_llm = _build_stage_endpoint(
             stage="stage5",
             pick=pick,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            fallback_model=model_default,
-            legacy_api_key=legacy_api_key,
         )
 
-        stage2_screening_concurrency = _as_optional_int_with_min(
-            pick("STAGE2_CONCURRENCY"),
-            1,
-        )
         stage2_llm1_concurrency = _as_optional_int_with_min(
             pick("STAGE2_LLM1_CONCURRENCY"),
             1,
@@ -404,10 +358,6 @@ class AppConfig:
             pick("STAGE2_LLM2_CONCURRENCY"),
             1,
         )
-        if stage2_llm1_concurrency is None:
-            stage2_llm1_concurrency = stage2_screening_concurrency
-        if stage2_llm2_concurrency is None:
-            stage2_llm2_concurrency = stage2_screening_concurrency
         stage2_arbitration_concurrency = _as_optional_int_with_min(
             pick("STAGE2_ARBITRATION_CONCURRENCY"),
             1,
@@ -443,9 +393,9 @@ class AppConfig:
             default_max_fragments=default_max_fragments,
             provider_base_urls=provider_base_urls,
             provider_api_keys=provider_api_keys,
-            api_key=legacy_api_key or stage1_llm.api_key,
-            base_url=legacy_base_url,
-            model_default=model_default,
+            api_key=stage1_llm.api_key,
+            base_url=stage1_llm.base_url,
+            model_default=stage1_llm.model,
             stage1_llm=stage1_llm,
             stage2_llm1=stage2_llm1,
             stage2_llm2=stage2_llm2,
@@ -453,7 +403,6 @@ class AppConfig:
             stage3_llm=stage3_llm,
             stage4_llm=stage4_llm,
             stage5_llm=stage5_llm,
-            stage2_screening_concurrency=stage2_screening_concurrency,
             stage2_llm1_concurrency=stage2_llm1_concurrency,
             stage2_llm2_concurrency=stage2_llm2_concurrency,
             stage2_arbitration_concurrency=stage2_arbitration_concurrency,
@@ -495,10 +444,10 @@ class AppConfig:
             if not endpoint.base_url.strip():
                 problems.append(f"阶段 `{endpoint.stage}` 缺少 base_url。")
             if not endpoint.api_key.strip():
-                key_name = PROVIDER_API_KEY_ENV_NAMES.get(endpoint.provider, "API_KEY")
+                key_name = PROVIDER_API_KEY_ENV_NAMES.get(endpoint.provider, "对应_PROVIDER_API_KEY")
                 problems.append(
                     f"阶段 `{endpoint.stage}` 使用 provider `{endpoint.provider}`，"
-                    f"但缺少密钥 `{key_name}`（或通用 `API_KEY`）。"
+                    f"但缺少密钥 `{key_name}`。"
                 )
         if problems:
             raise ValueError("LLM 配置不完整：\n- " + "\n- ".join(problems))

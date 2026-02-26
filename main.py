@@ -8,6 +8,7 @@ from pathlib import Path
 from core import AppConfig, LiteLLMClient, StateManager
 from core.cli_ui import CLIUI
 from core.logger import setup_logger
+from core.state_manager import STAGE_STATUS_COMPLETED, StageProgress
 from core.utils import parse_target_themes_from_proposal, read_json
 from workflow import (
     run_stage1_topic_selection,
@@ -35,19 +36,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scope-dirs", help="阶段二额外目录，逗号分隔，如 KR1a0001,KR3j0160")
     parser.add_argument("--max-fragments", type=int, help="阶段二最多处理的切片数（调试用）")
     parser.add_argument(
-        "--stage2-concurrency",
-        type=int,
-        help="阶段二每个模型的并发请求数（不传则自动计算）",
-    )
-    parser.add_argument(
         "--stage2-llm1-concurrency",
         type=int,
-        help="阶段二 llm1 并发请求数（优先于 --stage2-concurrency，不传则自动计算）",
+        help="阶段二 llm1 并发请求数（不传则自动计算）",
     )
     parser.add_argument(
         "--stage2-llm2-concurrency",
         type=int,
-        help="阶段二 llm2 并发请求数（优先于 --stage2-concurrency，不传则自动计算）",
+        help="阶段二 llm2 并发请求数（不传则自动计算）",
     )
     parser.add_argument(
         "--stage2-arbitration-concurrency",
@@ -229,6 +225,81 @@ def _confirm(message: str, auto_yes: bool, ui: CLIUI) -> bool:
     return answer in {"y", "yes"}
 
 
+def _show_project_progress(project_name: str, stage_progress: list[StageProgress], ui: CLIUI) -> None:
+    ui.section(f"项目进度 | {project_name}")
+    for item in stage_progress:
+        ui.key_value(f"[{item.stage_index}] {item.stage_name}", item.status_label)
+    print()
+
+
+def _choose_stage_index(
+    *,
+    stage_progress: list[StageProgress],
+    title: str,
+    prompt: str,
+    ui: CLIUI,
+) -> int:
+    ui.menu(
+        title,
+        [(str(item.stage_index), f"{item.stage_name} [{item.status_label}]") for item in stage_progress],
+    )
+    stage = _ask_choice(prompt, {str(item.stage_index) for item in stage_progress}, ui)
+    return int(stage)
+
+
+def _choose_existing_project_execution(
+    *,
+    stage_progress: list[StageProgress],
+    suggested_stage: int,
+    default_end_stage: int,
+    auto_yes: bool,
+    ui: CLIUI,
+) -> tuple[int, int]:
+    fallback_start = 5 if suggested_stage == 6 else suggested_stage
+    fallback_end = max(fallback_start, default_end_stage)
+
+    if auto_yes:
+        return fallback_start, fallback_end
+
+    continue_label = (
+        "从阶段 5 重新执行润色（项目已全部完成）"
+        if suggested_stage == 6
+        else f"继续当前进度（从阶段 {suggested_stage} 开始）"
+    )
+    ui.menu(
+        "请选择执行方式",
+        [
+            ("1", continue_label),
+            ("2", "重跑一个已完成阶段，并继续执行后续阶段"),
+            ("3", "仅执行一个指定阶段"),
+        ],
+    )
+    choice = _ask_choice("输入选项 [1/2/3]:", {"1", "2", "3"}, ui)
+    if choice == "1":
+        return fallback_start, fallback_end
+
+    if choice == "2":
+        completed = [item for item in stage_progress if item.status == STAGE_STATUS_COMPLETED]
+        if not completed:
+            ui.warning("当前没有已完成阶段可重跑，将继续当前进度。")
+            return fallback_start, fallback_end
+        stage = _choose_stage_index(
+            stage_progress=completed,
+            title="可重跑的已完成阶段",
+            prompt="输入要重跑的阶段编号:",
+            ui=ui,
+        )
+        return stage, 5
+
+    stage = _choose_stage_index(
+        stage_progress=stage_progress,
+        title="选择执行阶段",
+        prompt="输入要执行的阶段编号:",
+        ui=ui,
+    )
+    return stage, stage
+
+
 def main() -> int:
     args = _parse_args()
     ui = CLIUI()
@@ -253,6 +324,8 @@ def main() -> int:
         else:
             project_name, is_new = _choose_project_interactive(state_manager, ui)
 
+        stage_progress: list[StageProgress] = []
+        rerun_requested = False
         if is_new:
             state = state_manager.create_project(project_name)
             if not args.idea:
@@ -261,22 +334,60 @@ def main() -> int:
                 ui.error("研究意向不能为空。")
                 return 1
             start_stage = args.start_stage or 1
+            end_stage = args.end_stage
         else:
             state = state_manager.infer_state(project_name)
-            if state.next_stage == 6 and not args.start_stage:
-                ui.info(f"项目 {project_name} 已完成全部阶段。")
-                if not _confirm("是否从阶段5重新执行润色？", args.yes, ui):
-                    return 0
-                start_stage = 5
-            else:
-                start_stage = args.start_stage or state.next_stage
+            stage_progress = state_manager.infer_stage_progress(project_name)
+            _show_project_progress(project_name, stage_progress, ui)
 
-        end_stage = args.end_stage
+            if args.start_stage:
+                start_stage = args.start_stage
+                end_stage = args.end_stage
+            else:
+                start_stage, end_stage = _choose_existing_project_execution(
+                    stage_progress=stage_progress,
+                    suggested_stage=state.next_stage,
+                    default_end_stage=args.end_stage,
+                    auto_yes=args.yes,
+                    ui=ui,
+                )
+
+            highest_completed = state_manager.highest_completed_stage(stage_progress)
+            rerun_requested = start_stage <= highest_completed
+
         if start_stage > end_stage:
             ui.error(f"start-stage({start_stage}) 不能大于 end-stage({end_stage})")
             return 1
 
         project_dir = state.project_dir
+        if not is_new and rerun_requested:
+            if start_stage == 1 and not args.idea:
+                meta_path = project_dir / "1_research_proposal_meta.json"
+                if meta_path.exists():
+                    try:
+                        args.idea = str(read_json(meta_path).get("idea") or "")
+                    except Exception:  # noqa: BLE001
+                        args.idea = args.idea
+
+            stale_artifacts = state_manager.collect_artifacts_from_stage(project_dir, start_stage)
+            if stale_artifacts:
+                preview_items = [str(path.relative_to(project_dir)) for path in stale_artifacts[:8]]
+                if len(stale_artifacts) > 8:
+                    preview_items.append(f"... 其余 {len(stale_artifacts) - 8} 个文件")
+                ui.warning(
+                    f"将从阶段 {start_stage} 重跑，并清理该阶段及后续产物（共 {len(stale_artifacts)} 个文件）。"
+                )
+                ui.list_items(preview_items)
+                if not _confirm("是否继续清理并重跑？", args.yes, ui):
+                    return 0
+                removed = state_manager.clear_artifacts_from_stage(project_dir, start_stage)
+                logger.info(
+                    "用户请求重跑阶段 %s，已清理旧文件 %s 个",
+                    start_stage,
+                    len(removed),
+                )
+                ui.info(f"已清理旧产物 {len(removed)} 个，将重新执行阶段 {start_stage} 及其后续阶段。")
+
         ui.section("执行配置")
         ui.key_value("项目目录", str(project_dir))
         ui.key_value("执行阶段", f"{start_stage} -> {end_stage}")
@@ -296,28 +407,15 @@ def main() -> int:
             if args.max_fragments is not None
             else config.default_max_fragments
         )
-        stage2_concurrency = (
-            args.stage2_concurrency
-            if args.stage2_concurrency is not None
-            else config.stage2_screening_concurrency
-        )
         stage2_llm1_concurrency = (
             args.stage2_llm1_concurrency
             if args.stage2_llm1_concurrency is not None
-            else (
-                stage2_concurrency
-                if stage2_concurrency is not None
-                else config.stage2_llm1_concurrency
-            )
+            else config.stage2_llm1_concurrency
         )
         stage2_llm2_concurrency = (
             args.stage2_llm2_concurrency
             if args.stage2_llm2_concurrency is not None
-            else (
-                stage2_concurrency
-                if stage2_concurrency is not None
-                else config.stage2_llm2_concurrency
-            )
+            else config.stage2_llm2_concurrency
         )
 
         stage2_arbitration_concurrency = (
@@ -379,7 +477,7 @@ def main() -> int:
                     llm_client=llm_client,
                     llm_config=config.stage1_llm,
                     logger=logger,
-                    overwrite=args.overwrite_stage1,
+                    overwrite=args.overwrite_stage1 or (not is_new and rerun_requested),
                 )
 
             elif stage == 2:
@@ -445,7 +543,6 @@ def main() -> int:
                     logger=logger,
                     max_fragments=max_fragments,
                     max_empty_retries=stage2_max_empty_retries,
-                    screening_concurrency=stage2_concurrency,
                     llm1_concurrency=stage2_llm1_concurrency,
                     llm2_concurrency=stage2_llm2_concurrency,
                     arbitration_concurrency=stage2_arbitration_concurrency,

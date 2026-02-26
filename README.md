@@ -79,8 +79,8 @@ python3 main.py --continue-project demo_ming_study
   - `prompt.system` / `prompt.user_template`：系统提示词与用户模板（变量缺失会直接报错终止）
 - 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并在同一处配置该模型的 `rpm/tpm`（见 `core/config.py` 的 `PIPELINE_LLM_CONFIG`）。
 - 阶段二并发支持手工覆盖，也支持自动推导（推荐自动）：
-  - 旧参数：`STAGE2_CONCURRENCY` / `--stage2-concurrency`（同时作用 llm1/llm2）
-  - 新参数：`STAGE2_LLM1_CONCURRENCY` / `--stage2-llm1-concurrency`、`STAGE2_LLM2_CONCURRENCY` / `--stage2-llm2-concurrency`
+  - `STAGE2_LLM1_CONCURRENCY` / `--stage2-llm1-concurrency`
+  - `STAGE2_LLM2_CONCURRENCY` / `--stage2-llm2-concurrency`
 - 当并发参数留空时，系统会根据该模型的 `rpm/tpm` 与请求 token 估算自动计算并发。
 - 阶段二支持“同速并发”控制：`STAGE2_SYNC_HEADROOM`、`STAGE2_SYNC_MAX_AHEAD`（CLI 对应 `--stage2-sync-headroom`、`--stage2-sync-max-ahead`）。
 - 阶段二仲裁支持并发：`STAGE2_ARBITRATION_CONCURRENCY` / `--stage2-arbitration-concurrency`。

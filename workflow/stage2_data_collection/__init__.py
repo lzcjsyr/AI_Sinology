@@ -220,7 +220,6 @@ def run_stage2_data_collection(
     logger,
     max_fragments: int | None = None,
     max_empty_retries: int = 2,
-    screening_concurrency: int | None = None,
     llm1_concurrency: int | None = None,
     llm2_concurrency: int | None = None,
     arbitration_concurrency: int | None = None,
@@ -291,12 +290,6 @@ def run_stage2_data_collection(
             },
         )
 
-        effective_llm1_concurrency = (
-            llm1_concurrency if llm1_concurrency is not None else screening_concurrency
-        )
-        effective_llm2_concurrency = (
-            llm2_concurrency if llm2_concurrency is not None else screening_concurrency
-        )
         llm1_raw_path, llm2_raw_path, screening_audit = asyncio.run(
             run_archival_screening(
                 project_dir=project_dir,
@@ -306,8 +299,8 @@ def run_stage2_data_collection(
                 llm1_endpoint=llm1_endpoint,
                 llm2_endpoint=llm2_endpoint,
                 logger=logger,
-                llm1_concurrency=effective_llm1_concurrency,
-                llm2_concurrency=effective_llm2_concurrency,
+                llm1_concurrency=llm1_concurrency,
+                llm2_concurrency=llm2_concurrency,
                 sync_headroom=sync_headroom,
                 sync_max_ahead=sync_max_ahead,
                 sync_mode=sync_mode,
