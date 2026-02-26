@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.config import AppConfig
+from unittest.mock import patch
+
+from core.config import AppConfig, PIPELINE_LLM_CONFIG
 
 
 ENV_KEYS_TO_CLEAR = [
@@ -26,8 +28,34 @@ ENV_KEYS_TO_CLEAR = [
     "OPENROUTER_BASE_URL",
     "VOLCENGINE_BASE_URL",
     "STAGE2_CONCURRENCY",
+    "STAGE2_LLM1_CONCURRENCY",
+    "STAGE2_LLM2_CONCURRENCY",
+    "STAGE2_ARBITRATION_CONCURRENCY",
+    "STAGE1_RPM",
+    "STAGE1_TPM",
+    "STAGE2_LLM1_RPM",
+    "STAGE2_LLM1_TPM",
+    "STAGE2_LLM2_RPM",
+    "STAGE2_LLM2_TPM",
+    "STAGE2_LLM3_RPM",
+    "STAGE2_LLM3_TPM",
+    "STAGE3_RPM",
+    "STAGE3_TPM",
+    "STAGE4_RPM",
+    "STAGE4_TPM",
+    "STAGE5_RPM",
+    "STAGE5_TPM",
+    "STAGE2_SYNC_HEADROOM",
+    "STAGE2_SYNC_MAX_AHEAD",
+    "STAGE2_SYNC_MODE",
     "STAGE2_FRAGMENT_MAX_ATTEMPTS",
     "STAGE2_MAX_EMPTY_RETRIES",
+    "STAGE2_SILICONFLOW_RPM",
+    "STAGE2_SILICONFLOW_TPM",
+    "STAGE2_VOLCENGINE_RPM",
+    "STAGE2_VOLCENGINE_TPM",
+    "STAGE2_OPENROUTER_RPM",
+    "STAGE2_OPENROUTER_TPM",
 ]
 
 
@@ -62,10 +90,10 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(config.stage1_llm.provider, "siliconflow")
         self.assertEqual(config.stage2_llm1.provider, "siliconflow")
-        self.assertEqual(config.stage2_llm2.provider, "siliconflow")
+        self.assertEqual(config.stage2_llm2.provider, "volcengine")
         self.assertEqual(config.stage2_llm3.provider, "siliconflow")
         self.assertEqual(config.stage2_llm1.api_key, "sf_key")
-        self.assertEqual(config.stage2_llm2.api_key, "sf_key")
+        self.assertEqual(config.stage2_llm2.api_key, "ve_key")
         self.assertEqual(config.stage2_llm3.api_key, "sf_key")
         self.assertEqual(config.provider_base_urls["siliconflow"], "https://api.siliconflow.cn/v1")
         self.assertEqual(config.provider_base_urls["openrouter"], "https://openrouter.ai/api/v1")
@@ -73,7 +101,17 @@ class AppConfigTests(unittest.TestCase):
             config.provider_base_urls["volcengine"],
             "https://ark.cn-beijing.volces.com/api/v3",
         )
-        self.assertEqual(config.stage2_screening_concurrency, 4)
+        self.assertIsNone(config.stage2_screening_concurrency)
+        self.assertIsNone(config.stage2_llm1_concurrency)
+        self.assertIsNone(config.stage2_llm2_concurrency)
+        self.assertIsNone(config.stage2_arbitration_concurrency)
+        self.assertAlmostEqual(config.stage2_sync_headroom, 0.85)
+        self.assertEqual(config.stage2_sync_max_ahead, 128)
+        self.assertEqual(config.stage2_sync_mode, "lowest_shared")
+        self.assertEqual(config.stage2_llm1.rpm, 1000)
+        self.assertEqual(config.stage2_llm1.tpm, 100000)
+        self.assertEqual(config.stage2_llm2.rpm, 30000)
+        self.assertEqual(config.stage2_llm2.tpm, 5000000)
         self.assertEqual(config.stage2_fragment_max_attempts, 3)
         self.assertEqual(config.stage2_max_empty_retries, 2)
 
@@ -107,14 +145,32 @@ class AppConfigTests(unittest.TestCase):
             OPENROUTER_API_KEY=or_key
             VOLCENGINE_API_KEY=ve_key
             STAGE2_CONCURRENCY=9
+            STAGE2_LLM1_CONCURRENCY=11
+            STAGE2_LLM2_CONCURRENCY=13
+            STAGE2_ARBITRATION_CONCURRENCY=7
+            STAGE2_SYNC_HEADROOM=0.9
+            STAGE2_SYNC_MAX_AHEAD=64
             STAGE2_FRAGMENT_MAX_ATTEMPTS=5
             STAGE2_MAX_EMPTY_RETRIES=4
+            STAGE2_LLM1_RPM=1200
+            STAGE2_LLM1_TPM=240000
+            STAGE2_LLM2_RPM=32000
+            STAGE2_LLM2_TPM=5200000
             """
         )
 
         self.assertEqual(config.stage2_screening_concurrency, 9)
+        self.assertEqual(config.stage2_llm1_concurrency, 11)
+        self.assertEqual(config.stage2_llm2_concurrency, 13)
+        self.assertEqual(config.stage2_arbitration_concurrency, 7)
+        self.assertAlmostEqual(config.stage2_sync_headroom, 0.9)
+        self.assertEqual(config.stage2_sync_max_ahead, 64)
         self.assertEqual(config.stage2_fragment_max_attempts, 5)
         self.assertEqual(config.stage2_max_empty_retries, 4)
+        self.assertEqual(config.stage2_llm1.rpm, 1200)
+        self.assertEqual(config.stage2_llm1.tpm, 240000)
+        self.assertEqual(config.stage2_llm2.rpm, 32000)
+        self.assertEqual(config.stage2_llm2.tpm, 5200000)
 
     def test_stage2_max_empty_retries_allows_zero(self) -> None:
         config = self._load_with_env_file(
@@ -126,6 +182,51 @@ class AppConfigTests(unittest.TestCase):
             """
         )
         self.assertEqual(config.stage2_max_empty_retries, 0)
+
+    def test_stage2_llm_concurrency_falls_back_to_legacy_concurrency(self) -> None:
+        config = self._load_with_env_file(
+            """
+            SILICONFLOW_API_KEY=sf_key
+            VOLCENGINE_API_KEY=ve_key
+            STAGE2_CONCURRENCY=6
+            """
+        )
+        self.assertEqual(config.stage2_screening_concurrency, 6)
+        self.assertEqual(config.stage2_llm1_concurrency, 6)
+        self.assertEqual(config.stage2_llm2_concurrency, 6)
+
+    def test_stage2_model_limit_falls_back_to_legacy_provider_limit_env(self) -> None:
+        config = self._load_with_env_file(
+            """
+            SILICONFLOW_API_KEY=sf_key
+            VOLCENGINE_API_KEY=ve_key
+            STAGE2_SILICONFLOW_RPM=1234
+            STAGE2_SILICONFLOW_TPM=567890
+            STAGE2_VOLCENGINE_RPM=33333
+            STAGE2_VOLCENGINE_TPM=4444444
+            """
+        )
+        self.assertEqual(config.stage2_llm1.rpm, 1234)
+        self.assertEqual(config.stage2_llm1.tpm, 567890)
+        self.assertEqual(config.stage2_llm2.rpm, 33333)
+        self.assertEqual(config.stage2_llm2.tpm, 4444444)
+
+    def test_missing_stage_rate_limit_in_pipeline_config_raises(self) -> None:
+        with patch.dict(
+            PIPELINE_LLM_CONFIG,
+            {"stage2_llm1": {"provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V3.2"}},
+            clear=False,
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                self._load_with_env_file(
+                    """
+                    SILICONFLOW_API_KEY=sf_key
+                    OPENROUTER_API_KEY=or_key
+                    VOLCENGINE_API_KEY=ve_key
+                    """
+                )
+        self.assertIn("stage2_llm1", str(ctx.exception))
+        self.assertIn("rpm", str(ctx.exception))
 
 
 if __name__ == "__main__":

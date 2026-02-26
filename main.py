@@ -37,7 +37,32 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage2-concurrency",
         type=int,
-        help="阶段二每个模型的并发请求数",
+        help="阶段二每个模型的并发请求数（不传则自动计算）",
+    )
+    parser.add_argument(
+        "--stage2-llm1-concurrency",
+        type=int,
+        help="阶段二 llm1 并发请求数（优先于 --stage2-concurrency，不传则自动计算）",
+    )
+    parser.add_argument(
+        "--stage2-llm2-concurrency",
+        type=int,
+        help="阶段二 llm2 并发请求数（优先于 --stage2-concurrency，不传则自动计算）",
+    )
+    parser.add_argument(
+        "--stage2-arbitration-concurrency",
+        type=int,
+        help="阶段二争议仲裁并发请求数（不传则自动计算）",
+    )
+    parser.add_argument(
+        "--stage2-sync-headroom",
+        type=float,
+        help="阶段二同速限额头寸比例（0.01-1.0）",
+    )
+    parser.add_argument(
+        "--stage2-sync-max-ahead",
+        type=int,
+        help="阶段二双模型最大允许进度差（条）",
     )
     parser.add_argument(
         "--stage2-fragment-max-attempts",
@@ -276,6 +301,50 @@ def main() -> int:
             if args.stage2_concurrency is not None
             else config.stage2_screening_concurrency
         )
+        stage2_llm1_concurrency = (
+            args.stage2_llm1_concurrency
+            if args.stage2_llm1_concurrency is not None
+            else (
+                stage2_concurrency
+                if stage2_concurrency is not None
+                else config.stage2_llm1_concurrency
+            )
+        )
+        stage2_llm2_concurrency = (
+            args.stage2_llm2_concurrency
+            if args.stage2_llm2_concurrency is not None
+            else (
+                stage2_concurrency
+                if stage2_concurrency is not None
+                else config.stage2_llm2_concurrency
+            )
+        )
+
+        stage2_arbitration_concurrency = (
+            args.stage2_arbitration_concurrency
+            if args.stage2_arbitration_concurrency is not None
+            else config.stage2_arbitration_concurrency
+        )
+        stage2_sync_headroom = (
+            args.stage2_sync_headroom
+            if args.stage2_sync_headroom is not None
+            else config.stage2_sync_headroom
+        )
+        stage2_sync_max_ahead = (
+            args.stage2_sync_max_ahead
+            if args.stage2_sync_max_ahead is not None
+            else config.stage2_sync_max_ahead
+        )
+        if stage2_llm1_concurrency is not None and stage2_llm1_concurrency < 1:
+            raise RuntimeError("阶段二 llm1 并发参数必须 >= 1。")
+        if stage2_llm2_concurrency is not None and stage2_llm2_concurrency < 1:
+            raise RuntimeError("阶段二 llm2 并发参数必须 >= 1。")
+        if stage2_arbitration_concurrency is not None and stage2_arbitration_concurrency < 1:
+            raise RuntimeError("阶段二仲裁并发参数必须 >= 1。")
+        if not 0.01 <= float(stage2_sync_headroom) <= 1.0:
+            raise RuntimeError("阶段二同速 headroom 必须在 [0.01, 1.0]。")
+        if stage2_sync_max_ahead < 0:
+            raise RuntimeError("阶段二同速 max_ahead 必须 >= 0。")
         stage2_fragment_max_attempts = (
             args.stage2_fragment_max_attempts
             if args.stage2_fragment_max_attempts is not None
@@ -377,7 +446,14 @@ def main() -> int:
                     max_fragments=max_fragments,
                     max_empty_retries=stage2_max_empty_retries,
                     screening_concurrency=stage2_concurrency,
+                    llm1_concurrency=stage2_llm1_concurrency,
+                    llm2_concurrency=stage2_llm2_concurrency,
+                    arbitration_concurrency=stage2_arbitration_concurrency,
+                    sync_headroom=stage2_sync_headroom,
+                    sync_max_ahead=stage2_sync_max_ahead,
+                    sync_mode=config.stage2_sync_mode,
                     fragment_max_attempts=stage2_fragment_max_attempts,
+                    retry_backoff_seconds=config.retry_backoff_seconds,
                 )
 
             elif stage == 3:

@@ -220,8 +220,15 @@ def run_stage2_data_collection(
     logger,
     max_fragments: int | None = None,
     max_empty_retries: int = 2,
-    screening_concurrency: int = 4,
+    screening_concurrency: int | None = None,
+    llm1_concurrency: int | None = None,
+    llm2_concurrency: int | None = None,
+    arbitration_concurrency: int | None = None,
+    sync_headroom: float = 0.85,
+    sync_max_ahead: int = 128,
+    sync_mode: str = "lowest_shared",
     fragment_max_attempts: int = 3,
+    retry_backoff_seconds: float = 2.0,
 ) -> list[dict[str, Any]]:
     if not selected_scopes:
         raise ValueError("阶段二需要至少一个语料范围（scope）。")
@@ -284,6 +291,12 @@ def run_stage2_data_collection(
             },
         )
 
+        effective_llm1_concurrency = (
+            llm1_concurrency if llm1_concurrency is not None else screening_concurrency
+        )
+        effective_llm2_concurrency = (
+            llm2_concurrency if llm2_concurrency is not None else screening_concurrency
+        )
         llm1_raw_path, llm2_raw_path, screening_audit = asyncio.run(
             run_archival_screening(
                 project_dir=project_dir,
@@ -293,8 +306,13 @@ def run_stage2_data_collection(
                 llm1_endpoint=llm1_endpoint,
                 llm2_endpoint=llm2_endpoint,
                 logger=logger,
-                concurrency_per_model=screening_concurrency,
+                llm1_concurrency=effective_llm1_concurrency,
+                llm2_concurrency=effective_llm2_concurrency,
+                sync_headroom=sync_headroom,
+                sync_max_ahead=sync_max_ahead,
+                sync_mode=sync_mode,
                 fragment_max_attempts=fragment_max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
             )
         )
         latest_screening_audit = screening_audit
@@ -318,6 +336,8 @@ def run_stage2_data_collection(
                 llm_client=llm_client,
                 llm3_endpoint=llm3_endpoint,
                 logger=logger,
+                concurrency=arbitration_concurrency,
+                retry_backoff_seconds=retry_backoff_seconds,
             )
         )
 

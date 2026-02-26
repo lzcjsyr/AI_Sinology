@@ -16,11 +16,11 @@
 PIPELINE_LLM_CONFIG = {
     "stage1": {"provider": "siliconflow", "model": "..."},
     "stage2_llm1": {"provider": "siliconflow", "model": "..."},
-    "stage2_llm2": {"provider": "openrouter", "model": "..."},
+    "stage2_llm2": {"provider": "volcengine", "model": "doubao-seed-2-0-mini-260215"},
     "stage2_llm3": {"provider": "volcengine", "model": "..."},
     "stage3": {"provider": "siliconflow", "model": "..."},
     "stage4": {"provider": "siliconflow", "model": "..."},
-    "stage5": {"provider": "openrouter", "model": "..."},
+    "stage5": {"provider": "siliconflow", "model": "..."},
 }
 ```
 
@@ -57,7 +57,8 @@ python3 main.py \
   --scopes KR3j \
   --scope-dirs KR3j0160 \
   --max-fragments 8 \
-  --stage2-concurrency 4 \
+  --stage2-sync-headroom 0.85 \
+  --stage2-sync-max-ahead 128 \
   --yes
 ```
 
@@ -76,7 +77,17 @@ python3 main.py --continue-project demo_ming_study
   - `variables`：本步骤需要的输入变量说明
   - `expected_output`：模型返回格式说明
   - `prompt.system` / `prompt.user_template`：系统提示词与用户模板（变量缺失会直接报错终止）
-- 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并通过 `STAGE2_CONCURRENCY` 或 CLI 参数控制并发。
+- 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并在同一处配置该模型的 `rpm/tpm`（见 `core/config.py` 的 `PIPELINE_LLM_CONFIG`）。
+- 阶段二并发支持手工覆盖，也支持自动推导（推荐自动）：
+  - 旧参数：`STAGE2_CONCURRENCY` / `--stage2-concurrency`（同时作用 llm1/llm2）
+  - 新参数：`STAGE2_LLM1_CONCURRENCY` / `--stage2-llm1-concurrency`、`STAGE2_LLM2_CONCURRENCY` / `--stage2-llm2-concurrency`
+- 当并发参数留空时，系统会根据该模型的 `rpm/tpm` 与请求 token 估算自动计算并发。
+- 阶段二支持“同速并发”控制：`STAGE2_SYNC_HEADROOM`、`STAGE2_SYNC_MAX_AHEAD`（CLI 对应 `--stage2-sync-headroom`、`--stage2-sync-max-ahead`）。
+- 阶段二仲裁支持并发：`STAGE2_ARBITRATION_CONCURRENCY` / `--stage2-arbitration-concurrency`。
+- 阶段二支持按模型覆盖 RPM/TPM（默认：llm1=1000/100000，llm2=30000/5000000，llm3=1000/100000）：
+  - `STAGE2_LLM1_RPM` / `STAGE2_LLM1_TPM`
+  - `STAGE2_LLM2_RPM` / `STAGE2_LLM2_TPM`
+  - `STAGE2_LLM3_RPM` / `STAGE2_LLM3_TPM`
 - 阶段二检索范围来自 `data/kanripo_repos/KR-Catalog/KR/KR1.txt` 到 `KR4.txt` 的二级类目（如 `KR1a`、`KR3j`），CLI 展示格式为 `經部 [KR1a 易類]`。
 - 阶段二支持双通道输入：交互式多选类目（方向键+Enter 勾选/取消，底部“开始”按钮确认）和手动目录输入（如 `KR1a0001`），两者会自动合并并去重。
 - 交互式多选依赖 `prompt_toolkit`（已在 `requirements.txt` 中），若环境缺少依赖或非 TTY 终端，会自动降级为手动输入。

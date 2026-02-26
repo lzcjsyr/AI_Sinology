@@ -11,6 +11,10 @@ PB_PATTERN = re.compile(r"<pb:([^>]+)>")
 TITLE_PATTERN = re.compile(r"^#\+TITLE:\s*(.+)$", re.MULTILINE)
 CATALOG_SECTION_PATTERN = re.compile(r"^\*\s+KR[1-4]\s+(.+)$")
 CATALOG_ENTRY_PATTERN = re.compile(r"^\*\*\s+\[\[file:(KR[1-4][a-z])\.txt\]\[([^\]]+)\]\]$")
+TECH_MARKER_PATTERN = re.compile(
+    r"\bKR\d+[a-z]?\d*(?:_[A-Za-z0-9\-]+)*\b|_tls_|^pb:",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,11 @@ def _clean_fragment_text(text: str) -> str:
     for line in text.splitlines():
         if line.startswith("#+"):
             continue
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            comment_payload = stripped.lstrip("#").strip()
+            if TECH_MARKER_PATTERN.search(comment_payload or ""):
+                continue
         cleaned = line.replace("¶", "").strip()
         if cleaned:
             lines.append(cleaned)
