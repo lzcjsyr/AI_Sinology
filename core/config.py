@@ -48,14 +48,14 @@ PIPELINE_LLM_CONFIG: dict[str, dict[str, Any]] = {
         "tpm": 100000,
     },
     "stage2_llm1": {
-        "provider": "aliyun",
-        "model": "qwen3.5-flash",
+        "provider": "volcengine",
+        "model": "doubao-seed-2-0-lite-260215",
         "rpm": 30000,
-        "tpm": 10000000,
+        "tpm": 5000000,
     },
     "stage2_llm2": {
         "provider": "volcengine",
-        "model": "doubao-seed-2-0-lite-260215",
+        "model": "doubao-seed-2-0-mini-260215",
         "rpm": 30000,
         "tpm": 5000000,
     },

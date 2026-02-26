@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import json
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from core.config import LLMEndpointConfig
@@ -36,16 +37,83 @@ def _load_section_specs(spec: PromptSpec) -> list[tuple[str, str]]:
     return sections
 
 
+def _theme_key(theme: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", theme.lower())
+
+
+def _themes_are_similar(left_key: str, right_key: str) -> bool:
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+
+    shorter, longer = (
+        (left_key, right_key) if len(left_key) <= len(right_key) else (right_key, left_key)
+    )
+    if len(shorter) >= 4 and shorter in longer:
+        return True
+    return SequenceMatcher(None, left_key, right_key).ratio() >= 0.82
+
+
+def _coalesce_target_themes(raw_items: list[dict[str, str]], logger) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+
+        theme = str(item.get("theme", "")).strip()
+        desc = str(item.get("description", "")).strip()
+        key = _theme_key(theme)
+        if not theme or not key:
+            continue
+
+        duplicate: dict[str, str] | None = None
+        for existing in merged:
+            if _themes_are_similar(key, existing["__key"]):
+                duplicate = existing
+                break
+
+        if duplicate is not None:
+            if desc and desc not in duplicate["description"]:
+                duplicate["description"] = (
+                    f"{duplicate['description']}；{desc}"
+                    if duplicate["description"]
+                    else desc
+                )
+            logger.info("阶段一主题合并: `%s` -> `%s`", theme, duplicate["theme"])
+            continue
+
+        merged.append(
+            {
+                "theme": theme,
+                "description": desc,
+                "__key": key,
+            }
+        )
+
+    if len(merged) > 3:
+        logger.info("阶段一主题超过 3 个，按优先顺序截断为前 3 个。")
+
+    return [
+        {
+            "theme": item["theme"],
+            "description": item["description"],
+        }
+        for item in merged[:3]
+    ]
+
+
 def _generate_target_themes(
     llm_client: OpenAICompatClient,
     llm_config: LLMEndpointConfig,
     idea: str,
+    proposal: str,
     logger,
 ) -> list[dict[str, str]]:
     prompt_spec = load_prompt("stage1_target_themes")
     last_error: Exception | None = None
     for attempt in range(1, 4):
-        messages = build_messages(prompt_spec, idea=idea)
+        messages = build_messages(prompt_spec, idea=idea, proposal=proposal)
         try:
             response = llm_client.chat(
                 messages,
@@ -53,18 +121,11 @@ def _generate_target_themes(
                 **llm_config.as_client_kwargs(),
             )
             payload = parse_json_from_text(response.content)
-            items = payload.get("target_themes")
-            if not isinstance(items, list):
+            raw_items = payload.get("target_themes")
+            if not isinstance(raw_items, list):
                 raise ValueError("target_themes 不是数组")
 
-            themes: list[dict[str, str]] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                theme = str(item.get("theme", "")).strip()
-                desc = str(item.get("description", "")).strip()
-                if theme:
-                    themes.append({"theme": theme, "description": desc})
+            themes = _coalesce_target_themes(raw_items, logger)
             if themes:
                 return themes
             raise ValueError("target_themes 为空")
@@ -83,11 +144,19 @@ def _parse_section_content(response_content: str, section_title: str) -> str:
     return content
 
 
-def _compose_proposal(target_themes: list[dict[str, str]], sections: list[str]) -> str:
-    proposal = markdown_front_matter(target_themes)
+def _compose_proposal(
+    sections: list[str],
+    *,
+    target_themes: list[dict[str, str]] | None = None,
+) -> str:
+    blocks: list[str] = []
+    if target_themes:
+        blocks.append(markdown_front_matter(target_themes))
     if sections:
-        proposal += "\n\n" + "\n\n".join(sections)
-    return proposal + "\n"
+        blocks.append("\n\n".join(sections))
+    if not blocks:
+        return ""
+    return "\n\n".join(blocks) + "\n"
 
 
 def _restore_completed_sections(
@@ -140,6 +209,25 @@ def _restore_completed_sections(
     return completed
 
 
+def _write_stage1_meta(
+    *,
+    meta_path: Path,
+    idea: str,
+    target_themes: list[dict[str, str]],
+    section_total: int,
+    completed_sections: int,
+) -> None:
+    write_json(
+        meta_path,
+        {
+            "idea": idea,
+            "target_themes": target_themes,
+            "section_total": section_total,
+            "completed_sections": completed_sections,
+        },
+    )
+
+
 def run_stage1_topic_selection(
     *,
     project_dir: Path,
@@ -154,16 +242,31 @@ def run_stage1_topic_selection(
     section_prompt_spec = load_prompt("stage1_section_writer")
     section_specs = _load_section_specs(section_prompt_spec)
     section_total = len(section_specs)
-    target_themes: list[dict[str, str]] = []
     sections: list[str] = []
+    existing_themes_raw: list[dict[str, str]] = []
+    existing_themes: list[dict[str, str]] = []
 
     if output_path.exists() and not overwrite:
-        target_themes = parse_target_themes_from_proposal(output_path)
-        if target_themes:
-            sections = _restore_completed_sections(output_path, section_specs)
-            if len(sections) == section_total:
-                logger.info("阶段一已存在，复用: %s", output_path)
-                return target_themes
+        sections = _restore_completed_sections(output_path, section_specs)
+        existing_themes_raw = parse_target_themes_from_proposal(output_path)
+        existing_themes = _coalesce_target_themes(existing_themes_raw, logger)
+
+        if len(sections) == section_total and existing_themes:
+            if existing_themes != existing_themes_raw:
+                write_text(output_path, _compose_proposal(sections, target_themes=existing_themes))
+            _write_stage1_meta(
+                meta_path=meta_path,
+                idea=idea,
+                target_themes=existing_themes,
+                section_total=section_total,
+                completed_sections=len(sections),
+            )
+            logger.info("阶段一已存在，复用: %s", output_path)
+            return existing_themes
+
+        if len(sections) == section_total:
+            logger.info("阶段一正文已完成但缺少有效 target_themes，将补生成主题: %s", output_path)
+        elif sections:
             logger.info(
                 "阶段一检测到部分草稿，将续写剩余小节: %s (completed=%s/%s)",
                 output_path,
@@ -171,17 +274,11 @@ def run_stage1_topic_selection(
                 section_total,
             )
         else:
-            logger.info("阶段一检测到旧文件但缺少 target_themes，将从头重写: %s", output_path)
-
-    if not target_themes:
-        target_themes = _generate_target_themes(llm_client, llm_config, idea, logger)
-        sections = []
-
-    context = json.dumps(target_themes, ensure_ascii=False, indent=2)
-    write_text(output_path, _compose_proposal(target_themes, sections))
+            logger.info("阶段一将从头生成 proposal 草稿: %s", output_path)
 
     for idx, (title, instruction) in enumerate(section_specs[len(sections) :], start=len(sections) + 1):
         logger.info("阶段一小节生成中: %s/%s %s", idx, section_total, title)
+        context = _compose_proposal(sections) or "（暂无已完成草稿）"
         messages = build_messages(
             section_prompt_spec,
             idea=idea,
@@ -201,17 +298,24 @@ def run_stage1_topic_selection(
             raise RuntimeError(f"阶段一失败：小节 {title} 返回格式错误。error={exc}") from exc
 
         sections.append(f"## {title}\n\n{content}")
-        write_text(output_path, _compose_proposal(target_themes, sections))
+        write_text(output_path, _compose_proposal(sections))
         logger.info("阶段一小节已落盘: %s/%s %s -> %s", idx, section_total, title, output_path)
 
-    write_json(
-        meta_path,
-        {
-            "idea": idea,
-            "target_themes": target_themes,
-            "section_total": section_total,
-            "completed_sections": len(sections),
-        },
+    proposal = _compose_proposal(sections)
+    target_themes = _generate_target_themes(
+        llm_client=llm_client,
+        llm_config=llm_config,
+        idea=idea,
+        proposal=proposal,
+        logger=logger,
+    )
+    write_text(output_path, _compose_proposal(sections, target_themes=target_themes))
+    _write_stage1_meta(
+        meta_path=meta_path,
+        idea=idea,
+        target_themes=target_themes,
+        section_total=section_total,
+        completed_sections=len(sections),
     )
     logger.info("阶段一完成: %s", output_path)
     return target_themes
