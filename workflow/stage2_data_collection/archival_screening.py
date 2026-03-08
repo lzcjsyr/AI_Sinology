@@ -22,6 +22,11 @@ from workflow.stage2_data_collection.rate_control import (
 from core.utils import append_jsonl, parse_json_from_text, read_json, read_jsonl, write_json
 
 
+_JSON_MODE_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
+_JSON_MODE_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
+_JSON_MODE_WARNED_CACHE: set[tuple[str, str]] = set()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -43,6 +48,7 @@ class ScreeningStats:
     provider_throttled_count: int
     sync_throttled_count: int
     retry_count: int
+    failed_fragments: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +67,7 @@ class ScreeningStats:
             "provider_throttled_count": self.provider_throttled_count,
             "sync_throttled_count": self.sync_throttled_count,
             "retry_count": self.retry_count,
+            "failed_fragments": self.failed_fragments,
         }
 
 
@@ -88,6 +95,12 @@ def _normalize_matches_strict(
     target_themes: list[dict[str, str]],
 ) -> list[dict[str, Any]]:
     raw = payload.get("matches")
+    if not isinstance(raw, list):
+        for key in ("results", "items", "themes", "judgments"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                raw = candidate
+                break
     if not isinstance(raw, list):
         raise ValueError("LLM 返回缺少 matches 数组")
 
@@ -121,9 +134,24 @@ def _normalize_matches_strict(
             missing.append(theme_id)
             continue
 
-        if not isinstance(src.get("is_relevant"), bool):
+        is_relevant_value = src.get("is_relevant")
+        if isinstance(is_relevant_value, bool):
+            is_relevant = is_relevant_value
+        elif isinstance(is_relevant_value, (int, float)):
+            if int(is_relevant_value) in {0, 1}:
+                is_relevant = bool(int(is_relevant_value))
+            else:
+                raise ValueError(f"主题 `{theme_id}` 的 is_relevant 不是布尔值")
+        elif isinstance(is_relevant_value, str):
+            normalized = is_relevant_value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                is_relevant = True
+            elif normalized in {"false", "0", "no"}:
+                is_relevant = False
+            else:
+                raise ValueError(f"主题 `{theme_id}` 的 is_relevant 不是布尔值")
+        else:
             raise ValueError(f"主题 `{theme_id}` 的 is_relevant 不是布尔值")
-        is_relevant = bool(src.get("is_relevant"))
 
         reason = src.get("reason")
         relevance_level = src.get("relevance_level")
@@ -156,6 +184,112 @@ def _normalize_matches_strict(
     return result
 
 
+def _is_response_format_unsupported(error: Exception) -> bool:
+    message = str(error).lower()
+    if "response_format" not in message and "json_object" not in message:
+        return False
+    signals = (
+        "unsupported",
+        "not support",
+        "not supported",
+        "unknown",
+        "invalid",
+        "not allow",
+        "not permitted",
+    )
+    return any(signal in message for signal in signals)
+
+
+def _model_cache_key(llm_endpoint: LLMEndpointConfig) -> tuple[str, str]:
+    return (llm_endpoint.provider, llm_endpoint.model)
+
+
+def _known_json_mode_support(llm_endpoint: LLMEndpointConfig) -> bool | None:
+    provider = str(llm_endpoint.provider or "").strip().lower()
+    model = str(llm_endpoint.model or "").strip().lower()
+    # Doubao-Seed 2.0 系列当前不支持 response_format={"type":"json_object"}。
+    if provider == "volcengine" and model.startswith("doubao-seed-2-0"):
+        return False
+    return None
+
+
+def _build_failed_matches(
+    *,
+    target_themes: list[dict[str, str]],
+    error: Exception,
+) -> list[dict[str, Any]]:
+    error_text = str(error).strip()
+    return [
+        {
+            "theme": str(theme_item.get("theme") or "").strip(),
+            "theme_id": f"T{idx}",
+            "is_relevant": False,
+            "reason": None,
+            "relevance_level": None,
+            "screening_error": error_text,
+        }
+        for idx, theme_item in enumerate(target_themes, start=1)
+    ]
+
+
+async def _probe_json_mode_support(
+    *,
+    llm_client: OpenAICompatClient,
+    llm_endpoint: LLMEndpointConfig,
+    logger,
+) -> bool:
+    cache_key = _model_cache_key(llm_endpoint)
+    cached = _JSON_MODE_SUPPORT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    known = _known_json_mode_support(llm_endpoint)
+    if known is not None:
+        _JSON_MODE_SUPPORT_CACHE[cache_key] = known
+        if not known:
+            logger.info(
+                "模型 `%s` 已知不支持 JSON mode，阶段2.2将直接关闭 response_format。",
+                llm_endpoint.model,
+            )
+        return known
+
+    try:
+        response = await llm_client.achat(
+            [
+                {"role": "system", "content": "Return only a JSON object."},
+                {"role": "user", "content": "{\"ok\": true}"},
+            ],
+            model=llm_endpoint.model,
+            api_key=llm_endpoint.api_key,
+            api_keys=llm_endpoint.api_keys,
+            api_base=llm_endpoint.base_url,
+            temperature=0.0,
+            max_tokens=32,
+            response_format=_JSON_MODE_RESPONSE_FORMAT,
+        )
+        parse_json_from_text(response.content)
+        _JSON_MODE_SUPPORT_CACHE[cache_key] = True
+        return True
+    except Exception as e:  # noqa: BLE001
+        if _is_response_format_unsupported(e):
+            _JSON_MODE_SUPPORT_CACHE[cache_key] = False
+            logger.warning(
+                "模型 `%s` 不支持 JSON mode，本轮将关闭 response_format。provider=%s error=%s",
+                llm_endpoint.model,
+                llm_endpoint.provider,
+                e,
+            )
+            return False
+        # Non-capability failures should not disable json mode globally.
+        logger.warning(
+            "JSON mode 预检异常，先继续启用 JSON mode。provider=%s model=%s error=%s",
+            llm_endpoint.provider,
+            llm_endpoint.model,
+            e,
+        )
+        _JSON_MODE_SUPPORT_CACHE[cache_key] = True
+        return True
+
+
 async def _classify_fragment_strict(
     *,
     llm_client: OpenAICompatClient,
@@ -169,6 +303,7 @@ async def _classify_fragment_strict(
     retry_backoff_seconds: float,
     provider_limiter: DualRateLimiter | None = None,
     sync_limiter: DualRateLimiter | None = None,
+    prefer_json_mode: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None, RequestControlStats]:
     themes_block = "\n".join(
         f"- T{i+1} | theme: {t['theme']} | description: {t.get('description', '')}"
@@ -183,6 +318,8 @@ async def _classify_fragment_strict(
         original_text=fragment["original_text"],
     )
     estimated_tokens = _estimate_total_tokens(messages)
+    cache_key = _model_cache_key(llm_endpoint)
+    use_json_mode = bool(prefer_json_mode and _JSON_MODE_SUPPORT_CACHE.get(cache_key, True))
 
     last_error: Exception | None = None
     control_stats = RequestControlStats()
@@ -205,11 +342,15 @@ async def _classify_fragment_strict(
                 messages,
                 model=model,
                 api_key=llm_endpoint.api_key,
+                api_keys=llm_endpoint.api_keys,
                 api_base=llm_endpoint.base_url,
                 temperature=0.0,
+                response_format=_JSON_MODE_RESPONSE_FORMAT if use_json_mode else None,
             )
             payload = parse_json_from_text(response.content)
             matches = _normalize_matches_strict(payload, target_themes)
+            if use_json_mode:
+                _JSON_MODE_SUPPORT_CACHE[cache_key] = True
             actual_total_tokens = _extract_total_tokens(response.usage)
             if provider_limiter is not None and provider_reservation is not None:
                 await provider_limiter.commit(provider_reservation, actual_total_tokens)
@@ -217,6 +358,19 @@ async def _classify_fragment_strict(
                 await sync_limiter.commit(sync_reservation, actual_total_tokens)
             return matches, response.usage, control_stats
         except Exception as e:  # noqa: BLE001
+            if use_json_mode and _is_response_format_unsupported(e):
+                _JSON_MODE_SUPPORT_CACHE[cache_key] = False
+                use_json_mode = False
+                if cache_key not in _JSON_MODE_WARNED_CACHE:
+                    logger.warning(
+                        "模型不支持 JSON mode，自动降级文本解析。piece_id=%s model=%s error=%s",
+                        fragment.get("piece_id"),
+                        model,
+                        e,
+                    )
+                    _JSON_MODE_WARNED_CACHE.add(cache_key)
+                if attempt < max_attempts:
+                    continue
             last_error = e
             control_stats.retry_count += 1
             logger.warning(
@@ -252,6 +406,7 @@ def _flatten_records(
             "is_relevant": is_relevant,
             "reason": match.get("reason") if is_relevant else None,
             "relevance_level": match.get("relevance_level") if is_relevant else None,
+            "screening_error": match.get("screening_error"),
         }
         records.append(record)
     return records
@@ -444,6 +599,8 @@ async def _run_single_model(
     sync_limiter: DualRateLimiter | None = None,
     sync_gate: SyncProgressGate | None = None,
     progress_callback: Callable[[str, int, float | None, bool], None] | None = None,
+    json_mode_enabled: bool = True,
+    fragment_failure_fallback: bool = True,
 ) -> ScreeningStats:
     model = llm_endpoint.model
 
@@ -476,6 +633,7 @@ async def _run_single_model(
             provider_throttled_count=0,
             sync_throttled_count=0,
             retry_count=0,
+            failed_fragments=0,
         )
 
     # Idempotent resume support in case cursor lags behind already written rows.
@@ -514,6 +672,7 @@ async def _run_single_model(
             retry_backoff_seconds=retry_backoff_seconds,
             provider_limiter=provider_limiter,
             sync_limiter=sync_limiter,
+            prefer_json_mode=json_mode_enabled,
         )
         return idx, matches, usage, control_stats
 
@@ -542,6 +701,7 @@ async def _run_single_model(
         provider_throttled_count=0,
         sync_throttled_count=0,
         retry_count=0,
+        failed_fragments=0,
     )
 
     progress_step = max(1, total // 200)
@@ -612,10 +772,24 @@ async def _run_single_model(
                 idx = in_flight.pop(task)
                 try:
                     result_idx, matches, usage, control_stats = task.result()
-                except Exception:
-                    for pending_task in in_flight:
-                        pending_task.cancel()
-                    raise
+                except Exception as e:  # noqa: BLE001
+                    if not fragment_failure_fallback:
+                        for pending_task in in_flight:
+                            pending_task.cancel()
+                        raise
+                    fragment = fragments[idx]
+                    logger.error(
+                        "片段筛选最终失败，按不相关兜底继续。tag=%s model=%s piece_id=%s error=%s",
+                        tag,
+                        model,
+                        fragment.get("piece_id"),
+                        e,
+                    )
+                    result_idx = idx
+                    matches = _build_failed_matches(target_themes=target_themes, error=e)
+                    usage = None
+                    control_stats = RequestControlStats()
+                    stats.failed_fragments += 1
                 if result_idx != idx:
                     raise RuntimeError(f"并发调度错误：task idx={idx} result idx={result_idx}")
                 buffered_results[idx] = (matches, usage, control_stats)
@@ -706,8 +880,14 @@ async def run_archival_screening(
     cursor2_path = project_dir / ".cursor_llm2.json"
     progress = _InlineScreeningProgress(total=len(fragments))
 
-    llm1_provider_limits = RateLimits(rpm=llm1_endpoint.rpm, tpm=llm1_endpoint.tpm).normalized()
-    llm2_provider_limits = RateLimits(rpm=llm2_endpoint.rpm, tpm=llm2_endpoint.tpm).normalized()
+    llm1_provider_limits = RateLimits(
+        rpm=llm1_endpoint.effective_rpm,
+        tpm=llm1_endpoint.effective_tpm,
+    ).normalized()
+    llm2_provider_limits = RateLimits(
+        rpm=llm2_endpoint.effective_rpm,
+        tpm=llm2_endpoint.effective_tpm,
+    ).normalized()
     llm1_provider_limiter = DualRateLimiter(
         name=f"model:llm1:{llm1_endpoint.provider}/{llm1_endpoint.model}",
         limits=llm1_provider_limits,
@@ -760,6 +940,18 @@ async def run_archival_screening(
         progress.update(tag=tag, completed=completed, eta_seconds=eta_seconds, force=force)
 
     progress_callback = on_progress if progress.enabled else None
+    llm1_json_mode_enabled, llm2_json_mode_enabled = await asyncio.gather(
+        _probe_json_mode_support(
+            llm_client=llm_client,
+            llm_endpoint=llm1_endpoint,
+            logger=logger,
+        ),
+        _probe_json_mode_support(
+            llm_client=llm_client,
+            llm_endpoint=llm2_endpoint,
+            logger=logger,
+        ),
+    )
 
     try:
         stats1, stats2 = await asyncio.gather(
@@ -780,6 +972,8 @@ async def run_archival_screening(
                 sync_limiter=sync_limiter,
                 sync_gate=sync_gate,
                 progress_callback=progress_callback,
+                json_mode_enabled=llm1_json_mode_enabled,
+                fragment_failure_fallback=True,
             ),
             _run_single_model(
                 tag="llm2",
@@ -798,6 +992,8 @@ async def run_archival_screening(
                 sync_limiter=sync_limiter,
                 sync_gate=sync_gate,
                 progress_callback=progress_callback,
+                json_mode_enabled=llm2_json_mode_enabled,
+                fragment_failure_fallback=True,
             ),
         )
     finally:

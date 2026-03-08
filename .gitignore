@@ -26,3 +26,8 @@ tests/
 
 # Local virtual environment
 .venv/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+__pycache__/

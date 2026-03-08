@@ -22,6 +22,10 @@ ENV_KEYS_TO_CLEAR = [
     "OPENROUTER_API_KEY",
     "VOLCENGINE_API_KEY",
     "ALIYUN_API_KEY",
+    "SILICONFLOW_API_KEYS",
+    "OPENROUTER_API_KEYS",
+    "VOLCENGINE_API_KEYS",
+    "ALIYUN_API_KEYS",
     "SILICONFLOW_BASE_URL",
     "OPENROUTER_BASE_URL",
     "VOLCENGINE_BASE_URL",
@@ -82,12 +86,14 @@ class AppConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(config.stage1_llm.provider, "siliconflow")
-        self.assertEqual(config.stage2_llm1.provider, "aliyun")
+        self.assertEqual(config.stage2_llm1.provider, "volcengine")
         self.assertEqual(config.stage2_llm2.provider, "volcengine")
         self.assertEqual(config.stage2_llm3.provider, "volcengine")
-        self.assertEqual(config.stage2_llm1.api_key, "aliyun_key")
+        self.assertEqual(config.stage2_llm1.api_key, "ve_key")
         self.assertEqual(config.stage2_llm2.api_key, "ve_key")
         self.assertEqual(config.stage2_llm3.api_key, "ve_key")
+        self.assertEqual(config.stage2_llm2.api_keys, ("ve_key",))
+        self.assertEqual(config.stage2_llm2.api_key_count, 1)
         self.assertEqual(config.provider_base_urls["siliconflow"], "https://api.siliconflow.cn/v1")
         self.assertEqual(config.provider_base_urls["openrouter"], "https://openrouter.ai/api/v1")
         self.assertEqual(
@@ -105,7 +111,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.stage2_sync_max_ahead, 128)
         self.assertEqual(config.stage2_sync_mode, "lowest_shared")
         self.assertEqual(config.stage2_llm1.rpm, 30000)
-        self.assertEqual(config.stage2_llm1.tpm, 10000000)
+        self.assertEqual(config.stage2_llm1.tpm, 5000000)
         self.assertEqual(config.stage2_llm2.rpm, 30000)
         self.assertEqual(config.stage2_llm2.tpm, 5000000)
         self.assertEqual(config.stage2_fragment_max_attempts, 3)
@@ -155,6 +161,29 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.stage2_llm1.tpm, 240000)
         self.assertEqual(config.stage2_llm2.rpm, 32000)
         self.assertEqual(config.stage2_llm2.tpm, 5200000)
+
+    def test_provider_api_key_pool_supports_multiple_keys(self) -> None:
+        config = self._load_with_env_file(
+            """
+            SILICONFLOW_API_KEY=sf_key
+            OPENROUTER_API_KEY=or_key
+            VOLCENGINE_API_KEY=ve_key_legacy
+            VOLCENGINE_API_KEYS=ve_key_a,ve_key_b,ve_key_a
+            ALIYUN_API_KEY=aliyun_key
+            """
+        )
+
+        self.assertEqual(
+            config.provider_api_key_pools["volcengine"],
+            ("ve_key_a", "ve_key_b", "ve_key_legacy"),
+        )
+        self.assertEqual(config.provider_api_keys["volcengine"], "ve_key_a")
+        self.assertEqual(
+            config.stage2_llm2.api_keys,
+            ("ve_key_a", "ve_key_b", "ve_key_legacy"),
+        )
+        self.assertEqual(config.stage2_llm2.api_key, "ve_key_a")
+        self.assertEqual(config.stage2_llm2.api_key_count, 3)
 
     def test_stage2_max_empty_retries_allows_zero(self) -> None:
         config = self._load_with_env_file(

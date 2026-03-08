@@ -214,6 +214,7 @@ async def _arbitrate_single_dispute(
                 messages,
                 model=model,
                 api_key=llm_endpoint.api_key,
+                api_keys=llm_endpoint.api_keys,
                 api_base=llm_endpoint.base_url,
                 temperature=0.0,
             )
@@ -279,7 +280,10 @@ async def run_archival_arbitration(
     write_json(project_dir / "2_consensus_data.json", consensus)
     write_json(project_dir / "2_disputed_data.json", disputes)
 
-    provider_limits = RateLimits(rpm=llm3_endpoint.rpm, tpm=llm3_endpoint.tpm).normalized()
+    provider_limits = RateLimits(
+        rpm=llm3_endpoint.effective_rpm,
+        tpm=llm3_endpoint.effective_tpm,
+    ).normalized()
     limiter = DualRateLimiter(
         name=f"model:llm3:{llm3_endpoint.provider}/{llm3_endpoint.model}",
         limits=provider_limits,

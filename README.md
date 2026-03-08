@@ -42,6 +42,9 @@ SILICONFLOW_API_KEY=...
 OPENROUTER_API_KEY=...
 VOLCENGINE_API_KEY=...
 ALIYUN_API_KEY=...
+
+# 可选：同一 provider 多 key（逗号分隔），用于 LiteLLM Router 负载均衡
+VOLCENGINE_API_KEYS=key_1,key_2
 ```
 
 3. 安装依赖：
@@ -83,6 +86,7 @@ python3 main.py --continue-project demo_ming_study
   - `STAGE2_LLM1_CONCURRENCY` / `--stage2-llm1-concurrency`
   - `STAGE2_LLM2_CONCURRENCY` / `--stage2-llm2-concurrency`
 - 当并发参数留空时，系统会根据该模型的 `rpm/tpm` 与请求 token 估算自动计算并发。
+- 若配置了同一 provider 的多 key（如 `VOLCENGINE_API_KEYS`），系统会自动启用 LiteLLM Router 负载均衡，并按 key 数放大阶段二速率上限（`effective_rpm/tpm = rpm/tpm * key_count`）。
 - 阶段二支持“同速并发”控制：`STAGE2_SYNC_HEADROOM`、`STAGE2_SYNC_MAX_AHEAD`（CLI 对应 `--stage2-sync-headroom`、`--stage2-sync-max-ahead`）。
 - 阶段二仲裁支持并发：`STAGE2_ARBITRATION_CONCURRENCY` / `--stage2-arbitration-concurrency`。
 - 阶段二支持按模型覆盖 RPM/TPM（默认：llm1=30000/10000000，llm2=30000/5000000，llm3=30000/5000000）：

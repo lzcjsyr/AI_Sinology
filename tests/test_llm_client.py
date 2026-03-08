@@ -49,12 +49,14 @@ class LiteLLMClientTests(unittest.TestCase):
                 api_key="stage-key",
                 api_base="https://stage.example.com/v1",
                 temperature=0.0,
+                response_format={"type": "json_object"},
             )
 
         self.assertEqual(result.content, "sync-ok")
         self.assertEqual(captured["model"], "stage-model")
         self.assertEqual(captured["api_key"], "stage-key")
         self.assertEqual(captured["api_base"], "https://stage.example.com/v1")
+        self.assertEqual(captured["response_format"], {"type": "json_object"})
 
     def test_chat_falls_back_to_default_api_settings(self) -> None:
         captured: dict[str, str] = {}
@@ -102,6 +104,7 @@ class LiteLLMClientTests(unittest.TestCase):
                     api_key="async-key",
                     api_base="https://async.example.com/v1",
                     temperature=0.0,
+                    response_format={"type": "json_object"},
                 )
             )
 
@@ -109,6 +112,96 @@ class LiteLLMClientTests(unittest.TestCase):
         self.assertEqual(captured["model"], "async-model")
         self.assertEqual(captured["api_key"], "async-key")
         self.assertEqual(captured["api_base"], "https://async.example.com/v1")
+        self.assertEqual(captured["response_format"], {"type": "json_object"})
+
+    def test_chat_uses_router_for_multi_api_keys(self) -> None:
+        captured: dict[str, dict] = {}
+
+        class FakeRouter:
+            def __init__(self, **kwargs):
+                captured["init"] = kwargs
+
+            def completion(self, **kwargs):
+                captured["call"] = kwargs
+                return _mock_response("router-sync-ok")
+
+        def fail_completion(**kwargs):
+            raise AssertionError("single-key completion path should not be called")
+
+        async def fake_acompletion(**kwargs):
+            return _mock_response("unused")
+
+        with patch.object(llm_client_module, "Router", FakeRouter), patch.object(
+            llm_client_module,
+            "completion",
+            fail_completion,
+        ), patch.object(
+            llm_client_module,
+            "acompletion",
+            fake_acompletion,
+        ):
+            client = self._build_client()
+            result = client.chat(
+                [{"role": "user", "content": "hello"}],
+                model="stage-model",
+                api_base="https://stage.example.com/v1",
+                api_keys=["key-1", "key-2"],
+                temperature=0.0,
+            )
+
+        self.assertEqual(result.content, "router-sync-ok")
+        self.assertEqual(captured["init"]["routing_strategy"], "simple-shuffle")
+        self.assertEqual(len(captured["init"]["model_list"]), 2)
+        self.assertEqual(captured["init"]["model_list"][0]["litellm_params"]["api_key"], "key-1")
+        self.assertEqual(captured["init"]["model_list"][1]["litellm_params"]["api_key"], "key-2")
+        self.assertTrue(str(captured["call"]["model"]).startswith("pool_"))
+
+    def test_achat_uses_router_for_multi_api_keys(self) -> None:
+        captured: dict[str, dict] = {}
+
+        class FakeRouter:
+            def __init__(self, **kwargs):
+                captured["init"] = kwargs
+
+            def completion(self, **kwargs):
+                return _mock_response("unused")
+
+            async def acompletion(self, **kwargs):
+                captured["call"] = kwargs
+                return _mock_response("router-async-ok")
+
+        def fake_completion(**kwargs):
+            return _mock_response("unused")
+
+        async def fail_acompletion(**kwargs):
+            raise AssertionError("single-key async completion path should not be called")
+
+        with patch.object(llm_client_module, "Router", FakeRouter), patch.object(
+            llm_client_module,
+            "completion",
+            fake_completion,
+        ), patch.object(
+            llm_client_module,
+            "acompletion",
+            fail_acompletion,
+        ):
+            client = self._build_client()
+            result = asyncio.run(
+                client.achat(
+                    [{"role": "user", "content": "hello"}],
+                    model="async-model",
+                    api_base="https://async.example.com/v1",
+                    api_keys=("key-a", "key-b"),
+                    temperature=0.0,
+                )
+            )
+
+        self.assertEqual(result.content, "router-async-ok")
+        self.assertEqual(captured["init"]["routing_strategy"], "simple-shuffle")
+        self.assertEqual(len(captured["init"]["model_list"]), 2)
+        self.assertEqual(captured["init"]["model_list"][0]["litellm_params"]["api_key"], "key-a")
+        self.assertEqual(captured["init"]["model_list"][1]["litellm_params"]["api_key"], "key-b")
+        self.assertTrue(str(captured["call"]["model"]).startswith("pool_"))
 
 
 if __name__ == "__main__":
