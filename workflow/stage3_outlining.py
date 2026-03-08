@@ -6,6 +6,7 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.project_paths import resolve_stage2_json_path
 from core.prompt_loader import build_messages, load_prompt
 from core.utils import parse_json_from_text, parse_target_themes_from_proposal, read_json, write_yaml
 
@@ -88,13 +89,13 @@ def run_stage3_outlining(
 ) -> dict[str, Any]:
     prompt_spec = load_prompt("stage3_outline")
     proposal_path = project_dir / "1_research_proposal.md"
-    corpus_json_path = project_dir / "2_final_corpus.json"
+    corpus_json_path = resolve_stage2_json_path(project_dir, "2_final_corpus.json")
     output_path = project_dir / "3_outline_matrix.yaml"
 
     if not proposal_path.exists():
         raise RuntimeError("阶段三无法开始：缺少 1_research_proposal.md")
     if not corpus_json_path.exists():
-        raise RuntimeError("阶段三无法开始：缺少 2_final_corpus.json")
+        raise RuntimeError("阶段三无法开始：缺少阶段二内部语料 JSON")
 
     target_themes = parse_target_themes_from_proposal(proposal_path)
     corpus = read_json(corpus_json_path)

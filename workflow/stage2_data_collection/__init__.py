@@ -6,6 +6,11 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.project_paths import (
+    resolve_stage2_internal_path,
+    resolve_stage2_json_path,
+    stage2_internal_dir,
+)
 from core.utils import ensure_dir, read_json, read_jsonl, write_json, write_text
 from workflow.stage2_data_collection.archival_arbitration import run_archival_arbitration
 from workflow.stage2_data_collection.archival_screening import run_archival_screening
@@ -26,8 +31,10 @@ def _signature(
     llm1_endpoint: LLMEndpointConfig,
     llm2_endpoint: LLMEndpointConfig,
     llm3_endpoint: LLMEndpointConfig,
+    screening_batch_max_chars: int,
 ) -> dict[str, Any]:
     return {
+        "stage2_schema_version": 2,
         "scopes": sorted(selected_scopes),
         "target_themes": [
             {
@@ -36,6 +43,7 @@ def _signature(
             }
             for item in target_themes
         ],
+        "screening_batch_max_chars": int(screening_batch_max_chars),
         "stage2_llms": [
             {
                 "stage": llm1_endpoint.stage,
@@ -90,27 +98,34 @@ def read_cached_scopes(project_dir: Path, available_scopes: list[str]) -> list[s
 def _reset_stage2_artifacts(project_dir: Path) -> None:
     cleanup_files = [
         project_dir / "_processed_data" / "kanripo_fragments.jsonl",
+        project_dir / "_processed_data" / "kanripo_screening_batches.jsonl",
         project_dir / "2_llm1_raw.jsonl",
         project_dir / "2_llm2_raw.jsonl",
         project_dir / ".cursor_llm1.json",
+        resolve_stage2_internal_path(project_dir, ".cursor_llm1.json"),
         project_dir / ".cursor_llm2.json",
+        resolve_stage2_internal_path(project_dir, ".cursor_llm2.json"),
         project_dir / "2_consensus_data.yaml",
         project_dir / "2_consensus_data.json",
+        resolve_stage2_json_path(project_dir, "2_consensus_data.json"),
         project_dir / "2_disputed_data.yaml",
         project_dir / "2_disputed_data.json",
+        resolve_stage2_json_path(project_dir, "2_disputed_data.json"),
         project_dir / "2_llm3_verified.yaml",
         project_dir / "2_llm3_verified.json",
+        resolve_stage2_json_path(project_dir, "2_llm3_verified.json"),
         project_dir / "2_final_corpus.yaml",
         project_dir / "2_final_corpus.json",
+        resolve_stage2_json_path(project_dir, "2_final_corpus.json"),
         project_dir / "2_stage_failure_report.md",
     ]
-    for file_path in cleanup_files:
+    for file_path in dict.fromkeys(cleanup_files):
         if file_path.exists():
             file_path.unlink()
 
 
 def _load_existing_final(project_dir: Path) -> list[dict[str, Any]] | None:
-    final_json_path = project_dir / "2_final_corpus.json"
+    final_json_path = resolve_stage2_json_path(project_dir, "2_final_corpus.json")
     if not final_json_path.exists():
         return None
     try:
@@ -137,18 +152,19 @@ def _can_resume(
     if manifest.get("status") not in {"running", "screening_completed", "arbitrating"}:
         return False, None
 
-    if (project_dir / "2_final_corpus.json").exists():
+    if resolve_stage2_json_path(project_dir, "2_final_corpus.json").exists():
         return False, None
 
     # Resume requires at least the generated fragments pool and one progress signal.
     has_fragments = (project_dir / "_processed_data" / "kanripo_fragments.jsonl").exists()
+    has_batches = (project_dir / "_processed_data" / "kanripo_screening_batches.jsonl").exists()
     has_cursor_or_raw = (
-        (project_dir / ".cursor_llm1.json").exists()
-        or (project_dir / ".cursor_llm2.json").exists()
+        resolve_stage2_internal_path(project_dir, ".cursor_llm1.json").exists()
+        or resolve_stage2_internal_path(project_dir, ".cursor_llm2.json").exists()
         or (project_dir / "2_llm1_raw.jsonl").exists()
         or (project_dir / "2_llm2_raw.jsonl").exists()
     )
-    if not (has_fragments and has_cursor_or_raw):
+    if not (has_fragments and has_batches and has_cursor_or_raw):
         return False, None
 
     max_fragments = manifest.get("max_fragments")
@@ -228,12 +244,14 @@ def run_stage2_data_collection(
     sync_mode: str = "lowest_shared",
     fragment_max_attempts: int = 3,
     retry_backoff_seconds: float = 2.0,
+    screening_batch_max_chars: int = 300,
 ) -> list[dict[str, Any]]:
     if not selected_scopes:
         raise ValueError("阶段二需要至少一个语料范围（scope）。")
 
     processed_dir = project_dir / "_processed_data"
     ensure_dir(processed_dir)
+    ensure_dir(stage2_internal_dir(project_dir))
 
     existing_final = _load_existing_final(project_dir)
     if existing_final is not None:
@@ -246,6 +264,7 @@ def run_stage2_data_collection(
         llm1_endpoint,
         llm2_endpoint,
         llm3_endpoint,
+        screening_batch_max_chars,
     )
     can_resume, resume_limit = _can_resume(project_dir=project_dir, signature=signature)
 
@@ -305,6 +324,7 @@ def run_stage2_data_collection(
                 sync_mode=sync_mode,
                 fragment_max_attempts=fragment_max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                screening_batch_max_chars=screening_batch_max_chars,
             )
         )
         latest_screening_audit = screening_audit

@@ -16,9 +16,15 @@ STAGE_STATUS_LABELS = {
     STAGE_STATUS_COMPLETED: "已完成",
 }
 
+STAGE_STATUS_EMOJIS = {
+    STAGE_STATUS_NOT_STARTED: "⏳",
+    STAGE_STATUS_IN_PROGRESS: "🚧",
+    STAGE_STATUS_COMPLETED: "✅",
+}
+
 STAGE_COMPLETION_ARTIFACTS = {
     1: ["1_research_proposal_meta.json"],
-    2: ["2_final_corpus.json", "2_final_corpus.yaml"],
+    2: ["2_final_corpus.yaml"],
     3: ["3_outline_matrix.yaml"],
     4: ["4_first_draft.md"],
     5: ["5_final_manuscript.docx"],
@@ -29,10 +35,13 @@ STAGE_IN_PROGRESS_ARTIFACTS = {
     2: [
         "2_stage_manifest.json",
         "_processed_data/kanripo_fragments.jsonl",
+        "_processed_data/kanripo_screening_batches.jsonl",
         "2_llm1_raw.jsonl",
         "2_llm2_raw.jsonl",
         ".cursor_llm1.json",
+        "_internal/stage2/.cursor_llm1.json",
         ".cursor_llm2.json",
+        "_internal/stage2/.cursor_llm2.json",
         "2_stage_failure_report.md",
     ],
     3: ["3_outline_matrix.json"],
@@ -44,19 +53,26 @@ STAGE_RESET_ARTIFACTS = {
     1: ["1_research_proposal.md", "1_research_proposal_meta.json"],
     2: [
         "_processed_data/kanripo_fragments.jsonl",
+        "_processed_data/kanripo_screening_batches.jsonl",
         "2_stage_manifest.json",
         "2_llm1_raw.jsonl",
         "2_llm2_raw.jsonl",
         ".cursor_llm1.json",
+        "_internal/stage2/.cursor_llm1.json",
         ".cursor_llm2.json",
+        "_internal/stage2/.cursor_llm2.json",
         "2_consensus_data.yaml",
         "2_consensus_data.json",
+        "_internal/stage2/2_consensus_data.json",
         "2_disputed_data.yaml",
         "2_disputed_data.json",
+        "_internal/stage2/2_disputed_data.json",
         "2_llm3_verified.yaml",
         "2_llm3_verified.json",
+        "_internal/stage2/2_llm3_verified.json",
         "2_final_corpus.yaml",
         "2_final_corpus.json",
+        "_internal/stage2/2_final_corpus.json",
         "2_stage_failure_report.md",
     ],
     3: ["3_outline_matrix.yaml", "3_outline_matrix.json"],
@@ -97,6 +113,14 @@ class StageProgress:
     def status_label(self) -> str:
         return STAGE_STATUS_LABELS.get(self.status, "未知状态")
 
+    @property
+    def status_emoji(self) -> str:
+        return STAGE_STATUS_EMOJIS.get(self.status, "❔")
+
+    @property
+    def status_display(self) -> str:
+        return f"{self.status_emoji} {self.status_label}"
+
 
 class StateManager:
     def __init__(self, outputs_dir: Path) -> None:
@@ -117,6 +141,7 @@ class StateManager:
         project_dir = self.outputs_dir / safe_name
         ensure_dir(project_dir)
         ensure_dir(project_dir / "_processed_data")
+        ensure_dir(project_dir / "_internal" / "stage2")
         return ProjectState(
             project_name=safe_name,
             project_dir=project_dir,

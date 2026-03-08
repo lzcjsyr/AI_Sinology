@@ -76,6 +76,10 @@ python3 main.py --continue-project demo_ming_study
 ## 说明
 
 - 阶段配置入口：`core/config.py`。可以清晰地按步骤切换 provider/model。
+- 默认执行方式是“半自动”：
+  - 每完成一个阶段，CLI 会回到项目进度列表并刷新状态
+  - 只有你确认当前阶段成果后，才会继续进入下一阶段
+  - `--yes` 仍会跳过这些确认提示，适合全自动批跑
 - 提示词入口：`prompts/*.yaml`。每个步骤一个文件，统一结构为：
   - `metadata.step`：步骤标识
   - `metadata.purpose`：步骤用途说明
@@ -85,6 +89,8 @@ python3 main.py --continue-project demo_ming_study
 - 阶段二并发支持手工覆盖，也支持自动推导（推荐自动）：
   - `STAGE2_LLM1_CONCURRENCY` / `--stage2-llm1-concurrency`
   - `STAGE2_LLM2_CONCURRENCY` / `--stage2-llm2-concurrency`
+- 阶段二粗筛批次支持独立调参：
+  - `STAGE2_SCREENING_BATCH_MAX_CHARS` / `--stage2-screening-batch-max-chars`
 - 当并发参数留空时，系统会根据该模型的 `rpm/tpm` 与请求 token 估算自动计算并发。
 - 若配置了同一 provider 的多 key（如 `VOLCENGINE_API_KEYS`），系统会自动启用 LiteLLM Router 负载均衡，并按 key 数放大阶段二速率上限（`effective_rpm/tpm = rpm/tpm * key_count`）。
 - 阶段二支持“同速并发”控制：`STAGE2_SYNC_HEADROOM`、`STAGE2_SYNC_MAX_AHEAD`（CLI 对应 `--stage2-sync-headroom`、`--stage2-sync-max-ahead`）。
@@ -94,12 +100,21 @@ python3 main.py --continue-project demo_ming_study
   - `STAGE2_LLM2_RPM` / `STAGE2_LLM2_TPM`
   - `STAGE2_LLM3_RPM` / `STAGE2_LLM3_TPM`
 - 阶段二检索范围来自 `data/kanripo_repos/KR-Catalog/KR/KR1.txt` 到 `KR4.txt` 的二级类目（如 `KR1a`、`KR3j`），CLI 展示格式为 `經部 [KR1a 易類]`。
-- 阶段二支持双通道输入：交互式多选类目（方向键+Enter 勾选/取消，底部“开始”按钮确认）和手动目录输入（如 `KR1a0001`），两者会自动合并并去重。
+- 阶段二开始时会先让你选择检索方式：
+  - 按 `KR1a` 级别交互式勾选类目（方向键+Enter 勾选/取消，底部“开始”按钮确认）
+  - 手动输入范围（支持混输 `KR1a`、`KR1a0001`、`KR2e0020` 等）
+- 进入某种检索方式后，可随时返回上一层重新切换：
+  - 交互式多选里按 `ESC` / `Ctrl+C` 或点“取消”可返回“检索方式”选择
+  - 手动输入提示里输入 `b` 可返回上一层
+- 手动输入会自动去重并做父子归并：例如 `KR1a,KR1a0006` 会合并为 `KR1a`。
+- 如果手动输入的目录不存在，CLI 会明确提示不存在的目录名，并要求重新输入。
 - 交互式多选依赖 `prompt_toolkit`（已在 `requirements.txt` 中），若环境缺少依赖或非 TTY 终端，会自动降级为手动输入。
 - 阶段二使用 LiteLLM 调用 OpenAI 兼容 API，并支持高并发筛选。
-- 阶段二支持断点续传：`.cursor_llm1.json` 与 `.cursor_llm2.json`。
-- `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是按主题展开后的行级结果。
-  - 同一个 `piece_id` 会出现 N 次（N=目标主题数），这是“单次阅读、多主题判定”的展开结构，不是重复阅读。
+- 阶段二会先基于 `kanripo_fragments.jsonl` 生成 `_processed_data/kanripo_screening_batches.jsonl`，按同一 `source_file` 内相邻片段做贪心合并后再进行粗筛。
+- 阶段二支持断点续传：`_internal/stage2/.cursor_llm1.json` 与 `_internal/stage2/.cursor_llm2.json` 会按 batch 级索引恢复进度。
+- `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是最终的片段级命中结果。
+  - 仅对命中的 `piece_id + matched_theme` 落盘，避免为无关主题写入大规模负样本。
+  - 每条记录会附带 `screening_batch_id`、`localization_method`、`target_span`、`related_spans`，便于复查定位过程。
 - 阶段二日志统一写入 `2_stage_manifest.json`（包含所选 scopes、状态、重试信息和 `screening_audit`）。
 - 阶段五采用逐段润色（默认按 `####` 小节切片），每完成一段立即回写 `5_final_manuscript.md`，并记录 `5_polish_progress.json` 以支持中断续跑。
 - 产物按项目隔离存放在 `outputs/<project_name>/`。

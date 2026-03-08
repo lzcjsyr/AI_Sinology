@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import shutil
 import sys
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,19 +14,25 @@ from typing import Any, Callable
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.project_paths import (
+    resolve_stage2_internal_path,
+    stage2_internal_dir,
+    stage2_internal_path,
+)
 from core.prompt_loader import PromptSpec, build_messages, load_prompt
+from core.utils import append_jsonl, parse_json_from_text, read_json, read_jsonl, write_json, write_jsonl
 from workflow.stage2_data_collection.rate_control import (
     AcquireReservation,
     DualRateLimiter,
     RateLimits,
     build_lowest_shared_limits,
 )
-from core.utils import append_jsonl, parse_json_from_text, read_json, read_jsonl, write_json
 
 
 _JSON_MODE_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 _JSON_MODE_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
 _JSON_MODE_WARNED_CACHE: set[tuple[str, str]] = set()
+_SCREENING_BATCHES_FILE = "kanripo_screening_batches.jsonl"
 
 
 def _now_iso() -> str:
@@ -38,8 +46,10 @@ class ScreeningStats:
     provider: str
     start_index: int
     end_index: int
+    processed_batches: int
     processed_fragments: int
     raw_records_written: int
+    refined_batches: int
     total_tokens: int
     prompt_tokens: int
     completion_tokens: int
@@ -48,6 +58,7 @@ class ScreeningStats:
     provider_throttled_count: int
     sync_throttled_count: int
     retry_count: int
+    failed_batches: int = 0
     failed_fragments: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,8 +68,10 @@ class ScreeningStats:
             "provider": self.provider,
             "start_index": self.start_index,
             "end_index": self.end_index,
+            "processed_batches": self.processed_batches,
             "processed_fragments": self.processed_fragments,
             "raw_records_written": self.raw_records_written,
+            "refined_batches": self.refined_batches,
             "total_tokens": self.total_tokens,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
@@ -67,6 +80,7 @@ class ScreeningStats:
             "provider_throttled_count": self.provider_throttled_count,
             "sync_throttled_count": self.sync_throttled_count,
             "retry_count": self.retry_count,
+            "failed_batches": self.failed_batches,
             "failed_fragments": self.failed_fragments,
         }
 
@@ -79,6 +93,22 @@ class RequestControlStats:
     sync_throttled_count: int = 0
     retry_count: int = 0
 
+    def absorb(self, other: "RequestControlStats") -> None:
+        self.provider_wait_seconds += other.provider_wait_seconds
+        self.sync_wait_seconds += other.sync_wait_seconds
+        self.provider_throttled_count += other.provider_throttled_count
+        self.sync_throttled_count += other.sync_throttled_count
+        self.retry_count += other.retry_count
+
+
+@dataclass
+class BatchScreeningResult:
+    records: list[dict[str, Any]]
+    usage: dict[str, Any] | None
+    control_stats: RequestControlStats
+    used_refine: bool = False
+    failed: bool = False
+
 
 def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
     names = [str(item.get("theme") or "").strip() for item in target_themes]
@@ -88,6 +118,122 @@ def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
     if not names:
         raise RuntimeError("阶段2.2失败：target_themes 为空")
     return names
+
+
+def _screening_batches_path(project_dir: Path) -> Path:
+    return project_dir / "_processed_data" / _SCREENING_BATCHES_FILE
+
+
+def _fragment_char_count(text: str) -> int:
+    return len(str(text).replace("\n", ""))
+
+
+def _build_screening_batches(
+    fragments: list[dict[str, str]],
+    *,
+    batch_max_chars: int,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(batch_max_chars))
+    batches: list[dict[str, Any]] = []
+    current: list[dict[str, str]] = []
+    current_source = ""
+    current_char_count = 0
+
+    def flush() -> None:
+        nonlocal current, current_source, current_char_count
+        if not current:
+            return
+
+        batch_index = len(batches) + 1
+        parts: list[str] = []
+        piece_offsets: list[dict[str, Any]] = []
+        cursor = 0
+        for idx, fragment in enumerate(current):
+            text = str(fragment.get("original_text") or "")
+            if idx > 0:
+                parts.append("\n")
+                cursor += 1
+            start = cursor
+            parts.append(text)
+            cursor += len(text)
+            piece_offsets.append(
+                {
+                    "piece_id": str(fragment.get("piece_id") or ""),
+                    "start": start,
+                    "end": cursor,
+                }
+            )
+
+        batches.append(
+            {
+                "batch_id": f"batch_{batch_index:08d}",
+                "source_file": current_source,
+                "piece_ids": [str(fragment.get("piece_id") or "") for fragment in current],
+                "batch_text": "".join(parts),
+                "char_count": current_char_count,
+                "piece_offsets": piece_offsets,
+            }
+        )
+        current = []
+        current_source = ""
+        current_char_count = 0
+
+    for fragment in fragments:
+        piece_id = str(fragment.get("piece_id") or "").strip()
+        text = str(fragment.get("original_text") or "")
+        source_file = str(fragment.get("source_file") or "").strip()
+        if not piece_id or not text:
+            continue
+
+        fragment_chars = _fragment_char_count(text)
+        if not current:
+            current = [fragment]
+            current_source = source_file
+            current_char_count = fragment_chars
+            continue
+
+        should_flush = (
+            source_file != current_source
+            or (current_char_count + fragment_chars) > safe_limit
+        )
+        if should_flush:
+            flush()
+            current = [fragment]
+            current_source = source_file
+            current_char_count = fragment_chars
+            continue
+
+        current.append(fragment)
+        current_char_count += fragment_chars
+
+    flush()
+    return batches
+
+
+def _load_or_build_screening_batches(
+    *,
+    project_dir: Path,
+    fragments: list[dict[str, str]],
+    batch_max_chars: int,
+    logger,
+) -> list[dict[str, Any]]:
+    output_path = _screening_batches_path(project_dir)
+    existing = read_jsonl(output_path)
+    if existing:
+        logger.info("阶段2.2复用 screening batches: %s (records=%s)", output_path, len(existing))
+        return existing
+
+    batches = _build_screening_batches(fragments, batch_max_chars=batch_max_chars)
+    if not batches:
+        raise RuntimeError("阶段2.2无法继续：未生成任何 screening batch")
+    write_jsonl(output_path, batches)
+    logger.info(
+        "阶段2.2生成 screening batches: %s (batches=%s, max_chars=%s)",
+        output_path,
+        len(batches),
+        batch_max_chars,
+    )
+    return batches
 
 
 def _normalize_matches_strict(
@@ -154,20 +300,26 @@ def _normalize_matches_strict(
             raise ValueError(f"主题 `{theme_id}` 的 is_relevant 不是布尔值")
 
         reason = src.get("reason")
-        relevance_level = src.get("relevance_level")
+        target_span = src.get("target_span")
+        related_spans_raw = src.get("related_spans")
+        related_spans: list[str] = []
+        if isinstance(related_spans_raw, list):
+            for item in related_spans_raw:
+                text = str(item or "").strip()
+                if text:
+                    related_spans.append(text)
 
         if not is_relevant:
             reason = None
-            relevance_level = None
+            target_span = None
+            related_spans = []
         else:
-            if relevance_level is None:
-                raise ValueError(f"主题 `{theme_id}` 判定为相关但缺少 relevance_level")
-            relevance_level = str(relevance_level).upper().strip()
-            if relevance_level not in {"HIGH", "MEDIUM", "LOW"}:
-                raise ValueError(f"主题 `{theme_id}` 的 relevance_level 非法: {relevance_level}")
             reason = str(reason or "").strip()
             if not reason:
                 raise ValueError(f"主题 `{theme_id}` 判定为相关但缺少 reason")
+            target_span = str(target_span or "").strip()
+            if not target_span:
+                raise ValueError(f"主题 `{theme_id}` 判定为相关但缺少 target_span")
 
         result.append(
             {
@@ -175,12 +327,80 @@ def _normalize_matches_strict(
                 "theme_id": theme_id,
                 "is_relevant": is_relevant,
                 "reason": reason,
-                "relevance_level": relevance_level,
+                "target_span": target_span,
+                "related_spans": related_spans,
             }
         )
 
     if missing:
         raise ValueError(f"LLM 返回缺少主题判定: {missing}")
+    return result
+
+
+def _normalize_refined_matches(
+    payload: dict[str, Any],
+    unresolved_matches: list[dict[str, Any]],
+    batch_piece_ids: list[str],
+) -> list[dict[str, Any]]:
+    raw = payload.get("matches")
+    if not isinstance(raw, list):
+        raise ValueError("细筛返回缺少 matches 数组")
+
+    piece_order = {piece_id: idx for idx, piece_id in enumerate(batch_piece_ids)}
+    by_theme_id: dict[str, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        theme_id = str(item.get("theme_id") or "").strip().upper()
+        if theme_id:
+            by_theme_id[theme_id] = item
+
+    result: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for coarse_match in unresolved_matches:
+        theme_id = str(coarse_match.get("theme_id") or "").strip().upper()
+        src = by_theme_id.get(theme_id)
+        if src is None:
+            missing.append(theme_id)
+            continue
+
+        raw_piece_ids = src.get("relevant_piece_ids")
+        if not isinstance(raw_piece_ids, list):
+            raise ValueError(f"主题 `{theme_id}` 缺少 relevant_piece_ids 数组")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for piece_id in raw_piece_ids:
+            value = str(piece_id or "").strip()
+            if not value or value in seen:
+                continue
+            if value not in piece_order:
+                raise ValueError(f"主题 `{theme_id}` 返回了批次外的 piece_id: {value}")
+            seen.add(value)
+            deduped.append(value)
+        if not deduped:
+            raise ValueError(f"主题 `{theme_id}` 的 relevant_piece_ids 为空")
+
+        ordered = sorted(deduped, key=lambda item: piece_order[item])
+        positions = [piece_order[item] for item in ordered]
+        if positions[-1] - positions[0] + 1 != len(positions):
+            raise ValueError(f"主题 `{theme_id}` 的 relevant_piece_ids 必须连续")
+
+        reason = str(src.get("reason") or "").strip()
+        if not reason:
+            raise ValueError(f"主题 `{theme_id}` 缺少定位 reason")
+
+        result.append(
+            {
+                "theme": coarse_match["theme"],
+                "theme_id": theme_id,
+                "relevant_piece_ids": ordered,
+                "reason": reason,
+            }
+        )
+
+    if missing:
+        raise ValueError(f"细筛返回缺少主题判定: {missing}")
     return result
 
 
@@ -207,29 +427,9 @@ def _model_cache_key(llm_endpoint: LLMEndpointConfig) -> tuple[str, str]:
 def _known_json_mode_support(llm_endpoint: LLMEndpointConfig) -> bool | None:
     provider = str(llm_endpoint.provider or "").strip().lower()
     model = str(llm_endpoint.model or "").strip().lower()
-    # Doubao-Seed 2.0 系列当前不支持 response_format={"type":"json_object"}。
     if provider == "volcengine" and model.startswith("doubao-seed-2-0"):
         return False
     return None
-
-
-def _build_failed_matches(
-    *,
-    target_themes: list[dict[str, str]],
-    error: Exception,
-) -> list[dict[str, Any]]:
-    error_text = str(error).strip()
-    return [
-        {
-            "theme": str(theme_item.get("theme") or "").strip(),
-            "theme_id": f"T{idx}",
-            "is_relevant": False,
-            "reason": None,
-            "relevance_level": None,
-            "screening_error": error_text,
-        }
-        for idx, theme_item in enumerate(target_themes, start=1)
-    ]
 
 
 async def _probe_json_mode_support(
@@ -271,15 +471,14 @@ async def _probe_json_mode_support(
         return True
     except Exception as e:  # noqa: BLE001
         if _is_response_format_unsupported(e):
-            _JSON_MODE_SUPPORT_CACHE[cache_key] = False
             logger.warning(
                 "模型 `%s` 不支持 JSON mode，本轮将关闭 response_format。provider=%s error=%s",
                 llm_endpoint.model,
                 llm_endpoint.provider,
                 e,
             )
+            _JSON_MODE_SUPPORT_CACHE[cache_key] = False
             return False
-        # Non-capability failures should not disable json mode globally.
         logger.warning(
             "JSON mode 预检异常，先继续启用 JSON mode。provider=%s model=%s error=%s",
             llm_endpoint.provider,
@@ -290,126 +489,16 @@ async def _probe_json_mode_support(
         return True
 
 
-async def _classify_fragment_strict(
-    *,
-    llm_client: OpenAICompatClient,
-    model: str,
-    llm_endpoint: LLMEndpointConfig,
-    prompt_spec: PromptSpec,
-    fragment: dict[str, str],
-    target_themes: list[dict[str, str]],
-    logger,
-    max_attempts: int,
-    retry_backoff_seconds: float,
-    provider_limiter: DualRateLimiter | None = None,
-    sync_limiter: DualRateLimiter | None = None,
-    prefer_json_mode: bool = True,
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None, RequestControlStats]:
-    themes_block = "\n".join(
-        f"- T{i+1} | theme: {t['theme']} | description: {t.get('description', '')}"
-        for i, t in enumerate(target_themes)
-    )
-
-    messages = build_messages(
-        prompt_spec,
-        themes_block=themes_block,
-        piece_id=fragment["piece_id"],
-        source_file=fragment["source_file"],
-        original_text=fragment["original_text"],
-    )
-    estimated_tokens = _estimate_total_tokens(messages)
-    cache_key = _model_cache_key(llm_endpoint)
-    use_json_mode = bool(prefer_json_mode and _JSON_MODE_SUPPORT_CACHE.get(cache_key, True))
-
-    last_error: Exception | None = None
-    control_stats = RequestControlStats()
-    for attempt in range(1, max_attempts + 1):
-        provider_reservation: AcquireReservation | None = None
-        sync_reservation: AcquireReservation | None = None
-        try:
-            if provider_limiter is not None:
-                provider_reservation = await provider_limiter.acquire(estimated_tokens)
-                control_stats.provider_wait_seconds += provider_reservation.wait_seconds
-                if provider_reservation.throttled:
-                    control_stats.provider_throttled_count += 1
-            if sync_limiter is not None:
-                sync_reservation = await sync_limiter.acquire(estimated_tokens)
-                control_stats.sync_wait_seconds += sync_reservation.wait_seconds
-                if sync_reservation.throttled:
-                    control_stats.sync_throttled_count += 1
-
-            response = await llm_client.achat(
-                messages,
-                model=model,
-                api_key=llm_endpoint.api_key,
-                api_keys=llm_endpoint.api_keys,
-                api_base=llm_endpoint.base_url,
-                temperature=0.0,
-                response_format=_JSON_MODE_RESPONSE_FORMAT if use_json_mode else None,
-            )
-            payload = parse_json_from_text(response.content)
-            matches = _normalize_matches_strict(payload, target_themes)
-            if use_json_mode:
-                _JSON_MODE_SUPPORT_CACHE[cache_key] = True
-            actual_total_tokens = _extract_total_tokens(response.usage)
-            if provider_limiter is not None and provider_reservation is not None:
-                await provider_limiter.commit(provider_reservation, actual_total_tokens)
-            if sync_limiter is not None and sync_reservation is not None:
-                await sync_limiter.commit(sync_reservation, actual_total_tokens)
-            return matches, response.usage, control_stats
-        except Exception as e:  # noqa: BLE001
-            if use_json_mode and _is_response_format_unsupported(e):
-                _JSON_MODE_SUPPORT_CACHE[cache_key] = False
-                use_json_mode = False
-                if cache_key not in _JSON_MODE_WARNED_CACHE:
-                    logger.warning(
-                        "模型不支持 JSON mode，自动降级文本解析。piece_id=%s model=%s error=%s",
-                        fragment.get("piece_id"),
-                        model,
-                        e,
-                    )
-                    _JSON_MODE_WARNED_CACHE.add(cache_key)
-                if attempt < max_attempts:
-                    continue
-            last_error = e
-            control_stats.retry_count += 1
-            logger.warning(
-                "片段筛选失败，准备重试。piece_id=%s model=%s attempt=%s error=%s",
-                fragment.get("piece_id"),
-                model,
-                attempt,
-                e,
-            )
-            if attempt < max_attempts:
-                base = max(0.05, float(retry_backoff_seconds))
-                backoff = base * (2 ** (attempt - 1))
-                jitter = random.uniform(0.0, backoff * 0.25)
-                await asyncio.sleep(backoff + jitter)
-
-    raise RuntimeError(
-        f"片段筛选失败：piece_id={fragment.get('piece_id')} model={model} last_error={last_error}"
-    )
-
-
-def _flatten_records(
-    fragment: dict[str, str],
-    matches: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for match in matches:
-        is_relevant = bool(match.get("is_relevant", False))
-        record = {
-            "piece_id": fragment["piece_id"],
-            "source_file": fragment["source_file"],
-            "original_text": fragment["original_text"],
-            "matched_theme": match.get("theme"),
-            "is_relevant": is_relevant,
-            "reason": match.get("reason") if is_relevant else None,
-            "relevance_level": match.get("relevance_level") if is_relevant else None,
-            "screening_error": match.get("screening_error"),
-        }
-        records.append(record)
-    return records
+def _extract_total_tokens(usage: dict[str, Any] | None) -> int | None:
+    if not usage:
+        return None
+    total = usage.get("total_tokens")
+    if total is not None:
+        return int(total)
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    combined = prompt + completion
+    return combined or None
 
 
 def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int, int]:
@@ -421,21 +510,30 @@ def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int, int]:
     return prompt, completion, total
 
 
-def _extract_total_tokens(usage: dict[str, Any] | None) -> int | None:
-    if not usage:
+def _merge_usage(*usages: dict[str, Any] | None) -> dict[str, int] | None:
+    prompt_total = 0
+    completion_total = 0
+    total_total = 0
+    any_usage = False
+    for usage in usages:
+        if not usage:
+            continue
+        any_usage = True
+        prompt, completion, total = _usage_tokens(usage)
+        prompt_total += prompt
+        completion_total += completion
+        total_total += total
+    if not any_usage:
         return None
-    total = usage.get("total_tokens")
-    if total is None:
-        prompt = int(usage.get("prompt_tokens") or 0)
-        completion = int(usage.get("completion_tokens") or 0)
-        combined = prompt + completion
-        return combined or None
-    return int(total)
+    return {
+        "prompt_tokens": prompt_total,
+        "completion_tokens": completion_total,
+        "total_tokens": total_total,
+    }
 
 
 def _estimate_total_tokens(messages: list[dict[str, str]]) -> int:
     text = "\n".join(str(message.get("content") or "") for message in messages)
-    # Roughly estimate OpenAI-compatible token usage without tokenizer dependency.
     return max(256, int(len(text) * 0.72) + 160)
 
 
@@ -443,24 +541,24 @@ def _estimate_screening_request_tokens(
     *,
     prompt_spec: PromptSpec,
     target_themes: list[dict[str, str]],
-    fragments: list[dict[str, str]],
+    batches: list[dict[str, Any]],
     sample_size: int = 8,
 ) -> int:
-    if not fragments:
+    if not batches:
         return 512
     themes_block = "\n".join(
         f"- T{i+1} | theme: {t['theme']} | description: {t.get('description', '')}"
         for i, t in enumerate(target_themes)
     )
-    upper = max(1, min(int(sample_size), len(fragments)))
+    upper = max(1, min(int(sample_size), len(batches)))
     estimated: list[int] = []
-    for fragment in fragments[:upper]:
+    for batch in batches[:upper]:
         messages = build_messages(
             prompt_spec,
             themes_block=themes_block,
-            piece_id=fragment["piece_id"],
-            source_file=fragment["source_file"],
-            original_text=fragment["original_text"],
+            batch_id=batch["batch_id"],
+            source_file=batch["source_file"],
+            batch_text=batch["batch_text"],
         )
         estimated.append(_estimate_total_tokens(messages))
     return max(1, int(sum(estimated) / len(estimated)))
@@ -537,8 +635,6 @@ class _InlineScreeningProgress:
         if not self.enabled:
             return
 
-        # Wait until both model streams are available, to avoid colliding with
-        # startup logs and drawing a partial single-model line.
         if "llm1" not in self._state or "llm2" not in self._state:
             return
 
@@ -581,14 +677,514 @@ class _InlineScreeningProgress:
         self._stream.flush()
 
 
+def _matchable_char(ch: str) -> bool:
+    category = unicodedata.category(ch)
+    return category.startswith("L") or category.startswith("N")
+
+
+def _normalize_text_with_map(text: str) -> tuple[str, list[int]]:
+    normalized_chars: list[str] = []
+    index_map: list[int] = []
+    for idx, ch in enumerate(str(text)):
+        if not _matchable_char(ch):
+            continue
+        normalized_chars.append(ch.lower())
+        index_map.append(idx)
+    return "".join(normalized_chars), index_map
+
+
+def _normalize_match_query(text: str) -> str:
+    return "".join(ch.lower() for ch in str(text) if _matchable_char(ch))
+
+
+def _find_candidate_piece_ids(
+    *,
+    batch_text: str,
+    piece_offsets: list[dict[str, Any]],
+    candidate_text: str,
+) -> list[str]:
+    normalized_candidate = _normalize_match_query(candidate_text)
+    if len(normalized_candidate) < 2:
+        return []
+
+    normalized_batch, index_map = _normalize_text_with_map(batch_text)
+    if not normalized_batch:
+        return []
+
+    resolved_sets: list[tuple[str, ...]] = []
+    search_start = 0
+    while True:
+        found = normalized_batch.find(normalized_candidate, search_start)
+        if found < 0:
+            break
+        start = index_map[found]
+        end = index_map[found + len(normalized_candidate) - 1] + 1
+        piece_ids: list[str] = []
+        for item in piece_offsets:
+            piece_id = str(item.get("piece_id") or "")
+            piece_start = int(item.get("start") or 0)
+            piece_end = int(item.get("end") or 0)
+            if max(start, piece_start) < min(end, piece_end):
+                piece_ids.append(piece_id)
+        if piece_ids:
+            resolved_sets.append(tuple(piece_ids))
+        search_start = found + 1
+
+    unique_sets: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    for item in resolved_sets:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique_sets.append(item)
+    if len(unique_sets) != 1:
+        return []
+    return list(unique_sets[0])
+
+
+def _build_themes_block(target_themes: list[dict[str, str]]) -> str:
+    return "\n".join(
+        f"- T{i+1} | theme: {t['theme']} | description: {t.get('description', '')}"
+        for i, t in enumerate(target_themes)
+    )
+
+
+def _build_unresolved_themes_block(unresolved_matches: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        [
+            " | ".join(
+                [
+                    f"{match['theme_id']}",
+                    f"theme={match['theme']}",
+                    f"reason={match['reason']}",
+                    f"target_span={match['target_span']}",
+                    f"related_spans={json.dumps(match['related_spans'], ensure_ascii=False)}",
+                ]
+            )
+            for match in unresolved_matches
+        ]
+    )
+
+
+async def _classify_fragment_strict(
+    *,
+    llm_client: OpenAICompatClient,
+    model: str,
+    llm_endpoint: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
+    fragment: dict[str, Any],
+    target_themes: list[dict[str, str]],
+    logger,
+    max_attempts: int,
+    retry_backoff_seconds: float,
+    provider_limiter: DualRateLimiter | None = None,
+    sync_limiter: DualRateLimiter | None = None,
+    prefer_json_mode: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, RequestControlStats]:
+    themes_block = _build_themes_block(target_themes)
+    batch_id = str(fragment.get("batch_id") or fragment.get("piece_id") or "").strip()
+    batch_text = str(fragment.get("batch_text") or fragment.get("original_text") or "")
+
+    messages = build_messages(
+        prompt_spec,
+        themes_block=themes_block,
+        batch_id=batch_id,
+        source_file=fragment["source_file"],
+        batch_text=batch_text,
+    )
+    estimated_tokens = _estimate_total_tokens(messages)
+    cache_key = _model_cache_key(llm_endpoint)
+    use_json_mode = bool(prefer_json_mode and _JSON_MODE_SUPPORT_CACHE.get(cache_key, True))
+
+    last_error: Exception | None = None
+    control_stats = RequestControlStats()
+    for attempt in range(1, max_attempts + 1):
+        provider_reservation: AcquireReservation | None = None
+        sync_reservation: AcquireReservation | None = None
+        try:
+            if provider_limiter is not None:
+                provider_reservation = await provider_limiter.acquire(estimated_tokens)
+                control_stats.provider_wait_seconds += provider_reservation.wait_seconds
+                if provider_reservation.throttled:
+                    control_stats.provider_throttled_count += 1
+            if sync_limiter is not None:
+                sync_reservation = await sync_limiter.acquire(estimated_tokens)
+                control_stats.sync_wait_seconds += sync_reservation.wait_seconds
+                if sync_reservation.throttled:
+                    control_stats.sync_throttled_count += 1
+
+            response = await llm_client.achat(
+                messages,
+                model=model,
+                api_key=llm_endpoint.api_key,
+                api_keys=llm_endpoint.api_keys,
+                api_base=llm_endpoint.base_url,
+                temperature=0.0,
+                response_format=_JSON_MODE_RESPONSE_FORMAT if use_json_mode else None,
+            )
+            payload = parse_json_from_text(response.content)
+            matches = _normalize_matches_strict(payload, target_themes)
+            if use_json_mode:
+                _JSON_MODE_SUPPORT_CACHE[cache_key] = True
+            actual_total_tokens = _extract_total_tokens(response.usage)
+            if provider_limiter is not None and provider_reservation is not None:
+                await provider_limiter.commit(provider_reservation, actual_total_tokens)
+            if sync_limiter is not None and sync_reservation is not None:
+                await sync_limiter.commit(sync_reservation, actual_total_tokens)
+            return matches, response.usage, control_stats
+        except Exception as e:  # noqa: BLE001
+            if use_json_mode and _is_response_format_unsupported(e):
+                _JSON_MODE_SUPPORT_CACHE[cache_key] = False
+                use_json_mode = False
+                if cache_key not in _JSON_MODE_WARNED_CACHE:
+                    logger.warning(
+                        "模型不支持 JSON mode，自动降级文本解析。batch_id=%s model=%s error=%s",
+                        batch_id,
+                        model,
+                        e,
+                    )
+                    _JSON_MODE_WARNED_CACHE.add(cache_key)
+                if attempt < max_attempts:
+                    continue
+            last_error = e
+            control_stats.retry_count += 1
+            logger.warning(
+                "批次粗筛失败，准备重试。batch_id=%s model=%s attempt=%s error=%s",
+                batch_id,
+                model,
+                attempt,
+                e,
+            )
+            if attempt < max_attempts:
+                base = max(0.05, float(retry_backoff_seconds))
+                backoff = base * (2 ** (attempt - 1))
+                jitter = random.uniform(0.0, backoff * 0.25)
+                await asyncio.sleep(backoff + jitter)
+
+    raise RuntimeError(
+        f"批次粗筛失败：batch_id={batch_id} model={model} last_error={last_error}"
+    )
+
+
+async def _refine_batch_localization_strict(
+    *,
+    llm_client: OpenAICompatClient,
+    model: str,
+    llm_endpoint: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
+    batch: dict[str, Any],
+    unresolved_matches: list[dict[str, Any]],
+    fragment_map: dict[str, dict[str, str]],
+    logger,
+    max_attempts: int,
+    retry_backoff_seconds: float,
+    provider_limiter: DualRateLimiter | None = None,
+    sync_limiter: DualRateLimiter | None = None,
+    prefer_json_mode: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, RequestControlStats]:
+    piece_catalog = [
+        {
+            "piece_id": piece_id,
+            "text": str(fragment_map.get(piece_id, {}).get("original_text") or ""),
+        }
+        for piece_id in batch["piece_ids"]
+    ]
+    messages = build_messages(
+        prompt_spec,
+        unresolved_themes_block=_build_unresolved_themes_block(unresolved_matches),
+        batch_id=batch["batch_id"],
+        source_file=batch["source_file"],
+        batch_text=batch["batch_text"],
+        piece_catalog_json=json.dumps(piece_catalog, ensure_ascii=False),
+    )
+    estimated_tokens = _estimate_total_tokens(messages)
+    cache_key = _model_cache_key(llm_endpoint)
+    use_json_mode = bool(prefer_json_mode and _JSON_MODE_SUPPORT_CACHE.get(cache_key, True))
+
+    last_error: Exception | None = None
+    control_stats = RequestControlStats()
+    for attempt in range(1, max_attempts + 1):
+        provider_reservation: AcquireReservation | None = None
+        sync_reservation: AcquireReservation | None = None
+        try:
+            if provider_limiter is not None:
+                provider_reservation = await provider_limiter.acquire(estimated_tokens)
+                control_stats.provider_wait_seconds += provider_reservation.wait_seconds
+                if provider_reservation.throttled:
+                    control_stats.provider_throttled_count += 1
+            if sync_limiter is not None:
+                sync_reservation = await sync_limiter.acquire(estimated_tokens)
+                control_stats.sync_wait_seconds += sync_reservation.wait_seconds
+                if sync_reservation.throttled:
+                    control_stats.sync_throttled_count += 1
+
+            response = await llm_client.achat(
+                messages,
+                model=model,
+                api_key=llm_endpoint.api_key,
+                api_keys=llm_endpoint.api_keys,
+                api_base=llm_endpoint.base_url,
+                temperature=0.0,
+                response_format=_JSON_MODE_RESPONSE_FORMAT if use_json_mode else None,
+            )
+            payload = parse_json_from_text(response.content)
+            matches = _normalize_refined_matches(payload, unresolved_matches, batch["piece_ids"])
+            if use_json_mode:
+                _JSON_MODE_SUPPORT_CACHE[cache_key] = True
+            actual_total_tokens = _extract_total_tokens(response.usage)
+            if provider_limiter is not None and provider_reservation is not None:
+                await provider_limiter.commit(provider_reservation, actual_total_tokens)
+            if sync_limiter is not None and sync_reservation is not None:
+                await sync_limiter.commit(sync_reservation, actual_total_tokens)
+            return matches, response.usage, control_stats
+        except Exception as e:  # noqa: BLE001
+            if use_json_mode and _is_response_format_unsupported(e):
+                _JSON_MODE_SUPPORT_CACHE[cache_key] = False
+                use_json_mode = False
+                if cache_key not in _JSON_MODE_WARNED_CACHE:
+                    logger.warning(
+                        "模型不支持 JSON mode，细筛自动降级文本解析。batch_id=%s model=%s error=%s",
+                        batch.get("batch_id"),
+                        model,
+                        e,
+                    )
+                    _JSON_MODE_WARNED_CACHE.add(cache_key)
+                if attempt < max_attempts:
+                    continue
+            last_error = e
+            control_stats.retry_count += 1
+            logger.warning(
+                "批内细筛失败，准备重试。batch_id=%s model=%s attempt=%s error=%s",
+                batch.get("batch_id"),
+                model,
+                attempt,
+                e,
+            )
+            if attempt < max_attempts:
+                base = max(0.05, float(retry_backoff_seconds))
+                backoff = base * (2 ** (attempt - 1))
+                jitter = random.uniform(0.0, backoff * 0.25)
+                await asyncio.sleep(backoff + jitter)
+
+    raise RuntimeError(
+        f"批内细筛失败：batch_id={batch.get('batch_id')} model={model} last_error={last_error}"
+    )
+
+
+def _build_positive_record(
+    *,
+    batch: dict[str, Any],
+    fragment: dict[str, str],
+    match: dict[str, Any],
+    reason: str,
+    localization_method: str,
+) -> dict[str, Any]:
+    return {
+        "piece_id": fragment["piece_id"],
+        "source_file": fragment["source_file"],
+        "original_text": fragment["original_text"],
+        "matched_theme": match["theme"],
+        "is_relevant": True,
+        "reason": reason,
+        "screening_batch_id": batch["batch_id"],
+        "localization_method": localization_method,
+        "target_span": match.get("target_span"),
+        "related_spans": list(match.get("related_spans") or []),
+    }
+
+
+def _build_failed_records(
+    *,
+    batch: dict[str, Any],
+    fragment_map: dict[str, dict[str, str]],
+    target_themes: list[dict[str, str]],
+    error: Exception,
+) -> list[dict[str, Any]]:
+    error_text = str(error).strip()
+    records: list[dict[str, Any]] = []
+    for piece_id in batch["piece_ids"]:
+        fragment = fragment_map.get(piece_id)
+        if not fragment:
+            continue
+        for theme_item in target_themes:
+            theme = str(theme_item.get("theme") or "").strip()
+            records.append(
+                {
+                    "piece_id": fragment["piece_id"],
+                    "source_file": fragment["source_file"],
+                    "original_text": fragment["original_text"],
+                    "matched_theme": theme,
+                    "is_relevant": False,
+                    "reason": None,
+                    "screening_batch_id": batch["batch_id"],
+                    "localization_method": "screening_error",
+                    "target_span": None,
+                    "related_spans": [],
+                    "screening_error": error_text,
+                }
+            )
+    return records
+
+
+async def _screen_batch_strict(
+    *,
+    llm_client: OpenAICompatClient,
+    model: str,
+    llm_endpoint: LLMEndpointConfig,
+    prompt_spec: PromptSpec,
+    refine_prompt_spec: PromptSpec,
+    batch: dict[str, Any],
+    target_themes: list[dict[str, str]],
+    fragment_map: dict[str, dict[str, str]],
+    logger,
+    max_attempts: int,
+    retry_backoff_seconds: float,
+    provider_limiter: DualRateLimiter | None = None,
+    sync_limiter: DualRateLimiter | None = None,
+    prefer_json_mode: bool = True,
+) -> BatchScreeningResult:
+    matches, coarse_usage, control_stats = await _classify_fragment_strict(
+        llm_client=llm_client,
+        model=model,
+        llm_endpoint=llm_endpoint,
+        prompt_spec=prompt_spec,
+        fragment=batch,
+        target_themes=target_themes,
+        logger=logger,
+        max_attempts=max_attempts,
+        retry_backoff_seconds=retry_backoff_seconds,
+        provider_limiter=provider_limiter,
+        sync_limiter=sync_limiter,
+        prefer_json_mode=prefer_json_mode,
+    )
+
+    relevant_matches = [match for match in matches if bool(match.get("is_relevant"))]
+    if not relevant_matches:
+        return BatchScreeningResult(
+            records=[],
+            usage=coarse_usage,
+            control_stats=control_stats,
+            used_refine=False,
+        )
+
+    records: list[dict[str, Any]] = []
+    if len(batch["piece_ids"]) == 1:
+        piece_id = batch["piece_ids"][0]
+        fragment = fragment_map[piece_id]
+        for match in relevant_matches:
+            records.append(
+                _build_positive_record(
+                    batch=batch,
+                    fragment=fragment,
+                    match=match,
+                    reason=str(match.get("reason") or ""),
+                    localization_method="single_piece",
+                )
+            )
+        return BatchScreeningResult(
+            records=records,
+            usage=coarse_usage,
+            control_stats=control_stats,
+            used_refine=False,
+        )
+
+    unresolved: list[dict[str, Any]] = []
+    for match in relevant_matches:
+        localized_piece_ids = _find_candidate_piece_ids(
+            batch_text=batch["batch_text"],
+            piece_offsets=batch["piece_offsets"],
+            candidate_text=str(match.get("target_span") or ""),
+        )
+        if not localized_piece_ids:
+            for span in list(match.get("related_spans") or []):
+                localized_piece_ids = _find_candidate_piece_ids(
+                    batch_text=batch["batch_text"],
+                    piece_offsets=batch["piece_offsets"],
+                    candidate_text=span,
+                )
+                if localized_piece_ids:
+                    break
+
+        if not localized_piece_ids:
+            unresolved.append(match)
+            continue
+
+        for piece_id in localized_piece_ids:
+            fragment = fragment_map.get(piece_id)
+            if not fragment:
+                continue
+            records.append(
+                _build_positive_record(
+                    batch=batch,
+                    fragment=fragment,
+                    match=match,
+                    reason=str(match.get("reason") or ""),
+                    localization_method="regex",
+                )
+            )
+
+    if not unresolved:
+        return BatchScreeningResult(
+            records=records,
+            usage=coarse_usage,
+            control_stats=control_stats,
+            used_refine=False,
+        )
+
+    refined_matches, refine_usage, refine_stats = await _refine_batch_localization_strict(
+        llm_client=llm_client,
+        model=model,
+        llm_endpoint=llm_endpoint,
+        prompt_spec=refine_prompt_spec,
+        batch=batch,
+        unresolved_matches=unresolved,
+        fragment_map=fragment_map,
+        logger=logger,
+        max_attempts=max_attempts,
+        retry_backoff_seconds=retry_backoff_seconds,
+        provider_limiter=provider_limiter,
+        sync_limiter=sync_limiter,
+        prefer_json_mode=prefer_json_mode,
+    )
+    control_stats.absorb(refine_stats)
+
+    coarse_by_theme_id = {
+        str(match.get("theme_id") or "").strip().upper(): match for match in unresolved
+    }
+    for refined_match in refined_matches:
+        coarse_match = coarse_by_theme_id[str(refined_match["theme_id"]).upper()]
+        for piece_id in refined_match["relevant_piece_ids"]:
+            fragment = fragment_map.get(piece_id)
+            if not fragment:
+                continue
+            records.append(
+                _build_positive_record(
+                    batch=batch,
+                    fragment=fragment,
+                    match=coarse_match,
+                    reason=str(refined_match.get("reason") or ""),
+                    localization_method="llm_refine",
+                )
+            )
+
+    return BatchScreeningResult(
+        records=records,
+        usage=_merge_usage(coarse_usage, refine_usage),
+        control_stats=control_stats,
+        used_refine=True,
+    )
+
+
 async def _run_single_model(
     *,
     tag: str,
     llm_endpoint: LLMEndpointConfig,
     llm_client: OpenAICompatClient,
     prompt_spec: PromptSpec,
+    refine_prompt_spec: PromptSpec,
     target_themes: list[dict[str, str]],
-    fragments: list[dict[str, str]],
+    batches: list[dict[str, Any]],
+    fragment_map: dict[str, dict[str, str]],
     raw_output_path: Path,
     cursor_path: Path,
     logger,
@@ -608,11 +1204,11 @@ async def _run_single_model(
     if cursor_path.exists():
         try:
             cursor = read_json(cursor_path)
-            next_index = int(cursor.get("next_index", 0))
+            next_index = int(cursor.get("next_batch_index", 0))
         except Exception:  # noqa: BLE001
             next_index = 0
 
-    total = len(fragments)
+    total = len(batches)
     if next_index >= total:
         if sync_gate is not None:
             await sync_gate.set_processed(tag, total)
@@ -623,8 +1219,10 @@ async def _run_single_model(
             provider=llm_endpoint.provider,
             start_index=next_index,
             end_index=next_index,
+            processed_batches=0,
             processed_fragments=0,
             raw_records_written=0,
+            refined_batches=0,
             total_tokens=0,
             prompt_tokens=0,
             completion_tokens=0,
@@ -633,10 +1231,10 @@ async def _run_single_model(
             provider_throttled_count=0,
             sync_throttled_count=0,
             retry_count=0,
+            failed_batches=0,
             failed_fragments=0,
         )
 
-    # Idempotent resume support in case cursor lags behind already written rows.
     existing_flat_rows = read_jsonl(raw_output_path)
     seen_flat = {
         (str(row.get("piece_id") or ""), str(row.get("matched_theme") or ""))
@@ -645,7 +1243,7 @@ async def _run_single_model(
     }
 
     logger.info(
-        "%s 从 index=%s 开始处理，总量=%s，并发=%s，provider=%s，model=%s",
+        "%s 从 batch_index=%s 开始处理，总批次=%s，并发=%s，provider=%s，model=%s",
         tag,
         next_index,
         total,
@@ -654,19 +1252,19 @@ async def _run_single_model(
         llm_endpoint.model,
     )
 
-    async def run_one(
-        idx: int,
-    ) -> tuple[int, list[dict[str, Any]], dict[str, Any] | None, RequestControlStats]:
+    async def run_one(idx: int) -> tuple[int, BatchScreeningResult]:
         if sync_gate is not None:
             await sync_gate.wait_until_allowed(tag)
-        fragment = fragments[idx]
-        matches, usage, control_stats = await _classify_fragment_strict(
+        batch = batches[idx]
+        result = await _screen_batch_strict(
             llm_client=llm_client,
             model=model,
             llm_endpoint=llm_endpoint,
             prompt_spec=prompt_spec,
-            fragment=fragment,
+            refine_prompt_spec=refine_prompt_spec,
+            batch=batch,
             target_themes=target_themes,
+            fragment_map=fragment_map,
             logger=logger,
             max_attempts=fragment_max_attempts,
             retry_backoff_seconds=retry_backoff_seconds,
@@ -674,12 +1272,10 @@ async def _run_single_model(
             sync_limiter=sync_limiter,
             prefer_json_mode=json_mode_enabled,
         )
-        return idx, matches, usage, control_stats
+        return idx, result
 
     in_flight: dict[asyncio.Task, int] = {}
-    buffered_results: dict[
-        int, tuple[list[dict[str, Any]], dict[str, Any] | None, RequestControlStats]
-    ] = {}
+    buffered_results: dict[int, BatchScreeningResult] = {}
 
     write_index = next_index
     submit_index = next_index
@@ -691,8 +1287,10 @@ async def _run_single_model(
         provider=llm_endpoint.provider,
         start_index=next_index,
         end_index=next_index,
+        processed_batches=0,
         processed_fragments=0,
         raw_records_written=0,
+        refined_batches=0,
         total_tokens=0,
         prompt_tokens=0,
         completion_tokens=0,
@@ -701,6 +1299,7 @@ async def _run_single_model(
         provider_throttled_count=0,
         sync_throttled_count=0,
         retry_count=0,
+        failed_batches=0,
         failed_fragments=0,
     )
 
@@ -771,35 +1370,42 @@ async def _run_single_model(
             for task in done:
                 idx = in_flight.pop(task)
                 try:
-                    result_idx, matches, usage, control_stats = task.result()
+                    result_idx, batch_result = task.result()
                 except Exception as e:  # noqa: BLE001
+                    batch = batches[idx]
                     if not fragment_failure_fallback:
                         for pending_task in in_flight:
                             pending_task.cancel()
                         raise
-                    fragment = fragments[idx]
                     logger.error(
-                        "片段筛选最终失败，按不相关兜底继续。tag=%s model=%s piece_id=%s error=%s",
+                        "批次筛选最终失败，按不相关兜底继续。tag=%s model=%s batch_id=%s error=%s",
                         tag,
                         model,
-                        fragment.get("piece_id"),
+                        batch.get("batch_id"),
                         e,
                     )
+                    batch_result = BatchScreeningResult(
+                        records=_build_failed_records(
+                            batch=batch,
+                            fragment_map=fragment_map,
+                            target_themes=target_themes,
+                            error=e,
+                        ),
+                        usage=None,
+                        control_stats=RequestControlStats(),
+                        used_refine=False,
+                        failed=True,
+                    )
                     result_idx = idx
-                    matches = _build_failed_matches(target_themes=target_themes, error=e)
-                    usage = None
-                    control_stats = RequestControlStats()
-                    stats.failed_fragments += 1
                 if result_idx != idx:
                     raise RuntimeError(f"并发调度错误：task idx={idx} result idx={result_idx}")
-                buffered_results[idx] = (matches, usage, control_stats)
+                buffered_results[idx] = batch_result
 
             while write_index in buffered_results:
-                matches, usage, control_stats = buffered_results.pop(write_index)
-                fragment = fragments[write_index]
+                batch_result = buffered_results.pop(write_index)
+                batch = batches[write_index]
 
-                records = _flatten_records(fragment, matches)
-                for record in records:
+                for record in batch_result.records:
                     key = (str(record.get("piece_id") or ""), str(record.get("matched_theme") or ""))
                     if key in seen_flat:
                         continue
@@ -807,16 +1413,23 @@ async def _run_single_model(
                     seen_flat.add(key)
                     stats.raw_records_written += 1
 
-                prompt, completion, total_token = _usage_tokens(usage)
+                prompt, completion, total_token = _usage_tokens(batch_result.usage)
                 stats.prompt_tokens += prompt
                 stats.completion_tokens += completion
                 stats.total_tokens += total_token
-                stats.provider_wait_seconds += control_stats.provider_wait_seconds
-                stats.sync_wait_seconds += control_stats.sync_wait_seconds
-                stats.provider_throttled_count += control_stats.provider_throttled_count
-                stats.sync_throttled_count += control_stats.sync_throttled_count
-                stats.retry_count += control_stats.retry_count
-                stats.processed_fragments += 1
+                stats.provider_wait_seconds += batch_result.control_stats.provider_wait_seconds
+                stats.sync_wait_seconds += batch_result.control_stats.sync_wait_seconds
+                stats.provider_throttled_count += batch_result.control_stats.provider_throttled_count
+                stats.sync_throttled_count += batch_result.control_stats.sync_throttled_count
+                stats.retry_count += batch_result.control_stats.retry_count
+                stats.processed_batches += 1
+                stats.processed_fragments += len(batch["piece_ids"])
+                if batch_result.used_refine:
+                    stats.refined_batches += 1
+                if batch_result.failed:
+                    stats.failed_batches += 1
+                    stats.failed_fragments += len(batch["piece_ids"])
+
                 write_index += 1
                 stats.end_index = write_index
                 log_progress(write_index)
@@ -829,8 +1442,9 @@ async def _run_single_model(
                         "tag": tag,
                         "model": model,
                         "provider": llm_endpoint.provider,
-                        "next_index": write_index,
-                        "last_piece_id": fragment.get("piece_id"),
+                        "schema_version": 2,
+                        "next_batch_index": write_index,
+                        "last_batch_id": batch.get("batch_id"),
                         "updated_at": _now_iso(),
                     },
                 )
@@ -861,9 +1475,13 @@ async def run_archival_screening(
     sync_mode: str = "lowest_shared",
     fragment_max_attempts: int = 3,
     retry_backoff_seconds: float = 2.0,
+    screening_batch_max_chars: int = 300,
 ) -> tuple[Path, Path, dict[str, Any]]:
     _theme_names(target_themes)
     prompt_spec = load_prompt("stage2_screening")
+    refine_prompt_spec = load_prompt("stage2_localization")
+    internal_dir = stage2_internal_dir(project_dir)
+    internal_dir.mkdir(parents=True, exist_ok=True)
 
     fragments = read_jsonl(fragments_path)
     if not fragments:
@@ -873,12 +1491,30 @@ async def run_archival_screening(
         raise RuntimeError("阶段2.2参数 llm1_concurrency 必须 >= 1")
     if llm2_concurrency is not None and llm2_concurrency < 1:
         raise RuntimeError("阶段2.2参数 llm2_concurrency 必须 >= 1")
+    if screening_batch_max_chars < 1:
+        raise RuntimeError("阶段2.2参数 screening_batch_max_chars 必须 >= 1")
+
+    fragment_map = {
+        str(fragment.get("piece_id") or ""): {
+            "piece_id": str(fragment.get("piece_id") or ""),
+            "source_file": str(fragment.get("source_file") or ""),
+            "original_text": str(fragment.get("original_text") or ""),
+        }
+        for fragment in fragments
+        if fragment.get("piece_id")
+    }
+    batches = _load_or_build_screening_batches(
+        project_dir=project_dir,
+        fragments=fragments,
+        batch_max_chars=screening_batch_max_chars,
+        logger=logger,
+    )
 
     llm1_raw_path = project_dir / "2_llm1_raw.jsonl"
     llm2_raw_path = project_dir / "2_llm2_raw.jsonl"
-    cursor1_path = project_dir / ".cursor_llm1.json"
-    cursor2_path = project_dir / ".cursor_llm2.json"
-    progress = _InlineScreeningProgress(total=len(fragments))
+    cursor1_path = resolve_stage2_internal_path(project_dir, ".cursor_llm1.json")
+    cursor2_path = resolve_stage2_internal_path(project_dir, ".cursor_llm2.json")
+    progress = _InlineScreeningProgress(total=len(batches))
 
     llm1_provider_limits = RateLimits(
         rpm=llm1_endpoint.effective_rpm,
@@ -899,7 +1535,7 @@ async def run_archival_screening(
     estimated_tokens_per_request = _estimate_screening_request_tokens(
         prompt_spec=prompt_spec,
         target_themes=target_themes,
-        fragments=fragments,
+        batches=batches,
     )
     if llm1_concurrency is None:
         llm1_concurrency = _derive_auto_concurrency(
@@ -960,8 +1596,10 @@ async def run_archival_screening(
                 llm_endpoint=llm1_endpoint,
                 llm_client=llm_client,
                 prompt_spec=prompt_spec,
+                refine_prompt_spec=refine_prompt_spec,
                 target_themes=target_themes,
-                fragments=fragments,
+                batches=batches,
+                fragment_map=fragment_map,
                 raw_output_path=llm1_raw_path,
                 cursor_path=cursor1_path,
                 logger=logger,
@@ -980,8 +1618,10 @@ async def run_archival_screening(
                 llm_endpoint=llm2_endpoint,
                 llm_client=llm_client,
                 prompt_spec=prompt_spec,
+                refine_prompt_spec=refine_prompt_spec,
                 target_themes=target_themes,
-                fragments=fragments,
+                batches=batches,
+                fragment_map=fragment_map,
                 raw_output_path=llm2_raw_path,
                 cursor_path=cursor2_path,
                 logger=logger,
@@ -1001,7 +1641,9 @@ async def run_archival_screening(
 
     stats_payload = {
         "total_fragments": len(fragments),
+        "total_batches": len(batches),
         "target_theme_count": len(target_themes),
+        "screening_batch_max_chars": int(screening_batch_max_chars),
         "llm1": stats1.to_dict(),
         "llm2": stats2.to_dict(),
         "sync": {
@@ -1018,5 +1660,11 @@ async def run_archival_screening(
         },
     }
 
-    logger.info("阶段2.2完成: %s, %s", llm1_raw_path, llm2_raw_path)
+    logger.info(
+        "阶段2.2完成: %s, %s (fragments=%s, batches=%s)",
+        llm1_raw_path,
+        llm2_raw_path,
+        len(fragments),
+        len(batches),
+    )
     return llm1_raw_path, llm2_raw_path, stats_payload

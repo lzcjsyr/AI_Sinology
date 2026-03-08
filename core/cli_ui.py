@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -52,6 +53,29 @@ class CLIUI:
         columns = shutil.get_terminal_size((92, 30)).columns
         return max(72, min(columns, 108))
 
+    @staticmethod
+    def _display_width(text: str) -> int:
+        try:
+            from wcwidth import wcswidth
+
+            width = wcswidth(text)
+            if width >= 0:
+                return width
+        except Exception:  # noqa: BLE001
+            pass
+
+        width = 0
+        for ch in text:
+            if unicodedata.combining(ch):
+                continue
+            if unicodedata.category(ch) == "Cf":
+                continue
+            if unicodedata.east_asian_width(ch) in {"W", "F"} or unicodedata.category(ch) == "So":
+                width += 2
+            else:
+                width += 1
+        return width
+
     def _divider(self, char: str = "=", tone: str = "cyan") -> str:
         return self._style(char * self._width(), tone)
 
@@ -83,6 +107,26 @@ class CLIUI:
 
     def key_value(self, key: str, value: str) -> None:
         print(f"{self._style(key + ':', 'cyan', bold=True)} {value}")
+
+    def aligned_pair(
+        self,
+        left: str,
+        right: str,
+        *,
+        left_tone: str | None = "cyan",
+        right_tone: str | None = None,
+        left_bold: bool = True,
+        right_bold: bool = False,
+        left_dim: bool = False,
+        right_dim: bool = False,
+        min_gap: int = 2,
+    ) -> None:
+        gap = max(min_gap, self._width() - self._display_width(left) - self._display_width(right))
+        print(
+            f"{self._style(left, left_tone, bold=left_bold, dim=left_dim)}"
+            f"{' ' * gap}"
+            f"{self._style(right, right_tone, bold=right_bold, dim=right_dim)}"
+        )
 
     def info(self, message: str) -> None:
         print()

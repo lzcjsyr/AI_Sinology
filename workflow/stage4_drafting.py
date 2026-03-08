@@ -4,6 +4,7 @@ from pathlib import Path
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.project_paths import resolve_stage2_json_path
 from core.prompt_loader import PromptSpec, build_messages, load_prompt
 from core.utils import clamp_text, parse_json_from_text, read_json, read_yaml, write_text
 
@@ -61,20 +62,20 @@ def run_stage4_drafting(
 ) -> str:
     prompt_spec = load_prompt("stage4_subsection_analysis")
     outline_yaml_path = project_dir / "3_outline_matrix.yaml"
-    corpus_path = project_dir / "2_final_corpus.json"
+    corpus_path = resolve_stage2_json_path(project_dir, "2_final_corpus.json")
     output_path = project_dir / "4_first_draft.md"
 
     if not outline_yaml_path.exists():
         raise RuntimeError("阶段四无法开始：缺少 3_outline_matrix.yaml")
     outline = read_yaml(outline_yaml_path)
     if not corpus_path.exists():
-        raise RuntimeError("阶段四无法开始：缺少 2_final_corpus.json")
+        raise RuntimeError("阶段四无法开始：缺少阶段二内部语料 JSON")
 
     corpus = read_json(corpus_path)
     if not isinstance(outline, dict):
         raise RuntimeError("3_outline_matrix 结构错误")
     if not isinstance(corpus, list):
-        raise RuntimeError("2_final_corpus.json 结构错误")
+        raise RuntimeError("阶段二内部语料 JSON 结构错误")
 
     corpus_map = {
         str(item.get("piece_id")): {

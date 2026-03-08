@@ -91,6 +91,8 @@ STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     "llm1_concurrency": None,
     # LLM2 在 2.2 阶段执行片段筛选时的并发请求数；留空表示自动计算。
     "llm2_concurrency": None,
+    # 2.2 粗筛批次最大字符数；批次仅在同一 source_file 内贪心合并。
+    "screening_batch_max_chars": 300,
     
     # ---------------- 2.3 阶段：并发与资源控制 ----------------
     # LLM3 在 2.3 阶段执行交叉验证（针对差异结果进行仲裁）时的并发请求数；
@@ -327,6 +329,7 @@ class AppConfig:
     stage2_sync_mode: str
     stage2_fragment_max_attempts: int
     stage2_max_empty_retries: int
+    stage2_screening_batch_max_chars: int
 
     @classmethod
     def load(cls, root_dir: Path) -> "AppConfig":
@@ -445,6 +448,14 @@ class AppConfig:
             raise ValueError(
                 f"STAGE2_SYNC_MODE 仅支持 `lowest_shared`，实际为: {stage2_sync_mode}"
             )
+        stage2_screening_batch_max_chars = _as_int_with_min(
+            pick(
+                "STAGE2_SCREENING_BATCH_MAX_CHARS",
+                str(STAGE2_RUNTIME_DEFAULTS["screening_batch_max_chars"]),
+            ),
+            int(STAGE2_RUNTIME_DEFAULTS["screening_batch_max_chars"]),
+            1,
+        )
 
         return cls(
             root_dir=root_dir,
@@ -490,6 +501,7 @@ class AppConfig:
                 int(STAGE2_RUNTIME_DEFAULTS["max_empty_retries"]),
                 0,
             ),
+            stage2_screening_batch_max_chars=stage2_screening_batch_max_chars,
         )
 
     def validate_api(self) -> None:

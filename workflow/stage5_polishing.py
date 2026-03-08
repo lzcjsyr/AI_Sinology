@@ -9,6 +9,7 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.project_paths import resolve_stage2_json_path
 from core.prompt_loader import PromptSpec, build_messages, load_prompt
 from core.utils import parse_json_from_text, read_json, read_text, write_json, write_text
 
@@ -328,14 +329,14 @@ def run_stage5_polishing(
     abstract_prompt_spec = load_prompt("stage5_abstract_keywords")
     subsection_prompt_spec = load_prompt("stage5_subsection_polish")
     draft_path = project_dir / "4_first_draft.md"
-    corpus_path = project_dir / "2_final_corpus.json"
+    corpus_path = resolve_stage2_json_path(project_dir, "2_final_corpus.json")
     polished_md_path = project_dir / "5_final_manuscript.md"
     progress_path = project_dir / _STAGE5_PROGRESS_FILE
 
     if not draft_path.exists():
         raise RuntimeError("阶段五无法开始：缺少 4_first_draft.md")
     if not corpus_path.exists():
-        raise RuntimeError("阶段五无法开始：缺少 2_final_corpus.json")
+        raise RuntimeError("阶段五无法开始：缺少阶段二内部语料 JSON")
 
     draft_text = read_text(draft_path)
     restored_progress = _load_polish_progress(progress_path)

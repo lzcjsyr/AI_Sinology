@@ -8,22 +8,18 @@ from typing import Any
 
 from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
+from core.project_paths import stage2_internal_dir, stage2_internal_json_path
 from core.prompt_loader import PromptSpec, build_messages, load_prompt
-from workflow.stage2_data_collection.rate_control import DualRateLimiter, RateLimits
 from core.utils import clamp_text, parse_json_from_text, read_jsonl, write_json, write_yaml
+from workflow.stage2_data_collection.rate_control import DualRateLimiter, RateLimits
 
 
 def _record_key(record: dict[str, Any]) -> tuple[str, str]:
     return str(record.get("piece_id", "")), str(record.get("matched_theme", ""))
 
 
-def _normalize_level(level: Any) -> str | None:
-    if level is None:
-        return None
-    value = str(level).upper().strip()
-    if value in {"HIGH", "MEDIUM", "LOW"}:
-        return value
-    return "LOW"
+def _pick_shared_field(a: dict[str, Any], b: dict[str, Any], key: str) -> Any:
+    return a.get(key) or b.get(key)
 
 
 def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
@@ -31,18 +27,19 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     reason_b = str(b.get("reason") or "")
     chosen_reason = reason_a if len(reason_a) >= len(reason_b) else reason_b
 
-    level_a = _normalize_level(a.get("relevance_level"))
-    level_b = _normalize_level(b.get("relevance_level"))
-    level = level_a or level_b or "LOW"
+    related_spans = list(a.get("related_spans") or []) or list(b.get("related_spans") or [])
 
     return {
         "piece_id": a["piece_id"],
-        "source_file": a.get("source_file") or b.get("source_file"),
-        "original_text": a.get("original_text") or b.get("original_text"),
+        "source_file": _pick_shared_field(a, b, "source_file"),
+        "original_text": _pick_shared_field(a, b, "original_text"),
         "matched_theme": a["matched_theme"],
         "is_relevant": True,
         "reason": chosen_reason or "双模型一致判定相关",
-        "relevance_level": level,
+        "screening_batch_id": _pick_shared_field(a, b, "screening_batch_id"),
+        "localization_method": _pick_shared_field(a, b, "localization_method"),
+        "target_span": _pick_shared_field(a, b, "target_span"),
+        "related_spans": related_spans,
     }
 
 
@@ -57,6 +54,26 @@ def _build_maps(
     for rec in llm2_records:
         map2[_record_key(rec)] = rec
     return map1, map2
+
+
+def _dispute_side(record: dict[str, Any] | None) -> dict[str, Any]:
+    if record is None:
+        return {
+            "is_relevant": False,
+            "reason": None,
+            "target_span": None,
+            "related_spans": [],
+            "localization_method": None,
+            "screening_batch_id": None,
+        }
+    return {
+        "is_relevant": bool(record.get("is_relevant")),
+        "reason": record.get("reason") if record.get("is_relevant") else None,
+        "target_span": record.get("target_span") if record.get("is_relevant") else None,
+        "related_spans": list(record.get("related_spans") or []) if record.get("is_relevant") else [],
+        "localization_method": record.get("localization_method"),
+        "screening_batch_id": record.get("screening_batch_id"),
+    }
 
 
 def _consensus_and_disputes(
@@ -75,52 +92,24 @@ def _consensus_and_disputes(
         if a is None and b is None:
             continue
 
-        if a is None:
-            a = {
-                "piece_id": b["piece_id"],
-                "source_file": b.get("source_file"),
-                "original_text": b.get("original_text"),
-                "matched_theme": b["matched_theme"],
-                "is_relevant": False,
-                "reason": None,
-                "relevance_level": None,
-            }
-        if b is None:
-            b = {
-                "piece_id": a["piece_id"],
-                "source_file": a.get("source_file"),
-                "original_text": a.get("original_text"),
-                "matched_theme": a["matched_theme"],
-                "is_relevant": False,
-                "reason": None,
-                "relevance_level": None,
-            }
-
-        a_rel = bool(a.get("is_relevant"))
-        b_rel = bool(b.get("is_relevant"))
-
+        a_rel = bool(a and a.get("is_relevant"))
+        b_rel = bool(b and b.get("is_relevant"))
         if a_rel and b_rel:
             consensus.append(_consensus_record(a, b))
             continue
         if (not a_rel) and (not b_rel):
             continue
 
+        primary = a or b or {}
+        counterpart = b or a or {}
         disputes.append(
             {
-                "piece_id": a["piece_id"],
-                "source_file": a.get("source_file") or b.get("source_file"),
-                "original_text": a.get("original_text") or b.get("original_text"),
-                "matched_theme": a.get("matched_theme") or b.get("matched_theme"),
-                "llm1_result": {
-                    "is_relevant": a_rel,
-                    "relevance_level": _normalize_level(a.get("relevance_level")),
-                    "reason": a.get("reason") if a_rel else None,
-                },
-                "llm2_result": {
-                    "is_relevant": b_rel,
-                    "relevance_level": _normalize_level(b.get("relevance_level")),
-                    "reason": b.get("reason") if b_rel else None,
-                },
+                "piece_id": str(primary.get("piece_id") or counterpart.get("piece_id") or ""),
+                "source_file": _pick_shared_field(primary, counterpart, "source_file"),
+                "original_text": _pick_shared_field(primary, counterpart, "original_text"),
+                "matched_theme": str(primary.get("matched_theme") or counterpart.get("matched_theme") or ""),
+                "llm1_result": _dispute_side(a),
+                "llm2_result": _dispute_side(b),
             }
         )
 
@@ -225,15 +214,12 @@ async def _arbitrate_single_dispute(
                 raise ValueError("is_relevant 不是布尔值")
             is_relevant = bool(data.get("is_relevant"))
             if not is_relevant:
-                return {"is_relevant": False, "reason": None, "relevance_level": None}
+                return {"is_relevant": False, "reason": None}
 
             reason = str(data.get("reason") or "").strip()
-            level = _normalize_level(data.get("relevance_level"))
             if not reason:
                 raise ValueError("相关仲裁缺少 reason")
-            if level is None:
-                raise ValueError("相关仲裁缺少 relevance_level")
-            return {"is_relevant": True, "reason": reason, "relevance_level": level}
+            return {"is_relevant": True, "reason": reason}
         except Exception as e:  # noqa: BLE001
             last_error = e
             logger.warning(
@@ -270,6 +256,9 @@ async def run_archival_arbitration(
     if not llm1_records or not llm2_records:
         raise RuntimeError("阶段2.3无法继续：双模型原始结果为空")
 
+    internal_dir = stage2_internal_dir(project_dir)
+    internal_dir.mkdir(parents=True, exist_ok=True)
+
     consensus, disputes = _consensus_and_disputes(llm1_records, llm2_records)
 
     consensus_yaml_path = project_dir / "2_consensus_data.yaml"
@@ -277,8 +266,8 @@ async def run_archival_arbitration(
     write_yaml(consensus_yaml_path, consensus)
     write_yaml(disputed_yaml_path, disputes)
 
-    write_json(project_dir / "2_consensus_data.json", consensus)
-    write_json(project_dir / "2_disputed_data.json", disputes)
+    write_json(stage2_internal_json_path(project_dir, "2_consensus_data.json"), consensus)
+    write_json(stage2_internal_json_path(project_dir, "2_disputed_data.json"), disputes)
 
     provider_limits = RateLimits(
         rpm=llm3_endpoint.effective_rpm,
@@ -331,7 +320,6 @@ async def run_archival_arbitration(
                 "matched_theme": dispute["matched_theme"],
                 "is_relevant": True,
                 "reason": result.get("reason") or "仲裁判定相关",
-                "relevance_level": result.get("relevance_level") or "LOW",
             }
 
     await asyncio.gather(*[_worker(i, dispute) for i, dispute in enumerate(disputes)])
@@ -343,13 +331,13 @@ async def run_archival_arbitration(
 
     llm3_yaml_path = project_dir / "2_llm3_verified.yaml"
     write_yaml(llm3_yaml_path, verified)
-    write_json(project_dir / "2_llm3_verified.json", verified)
+    write_json(stage2_internal_json_path(project_dir, "2_llm3_verified.json"), verified)
 
     final_corpus = consensus + verified
 
     final_yaml_path = project_dir / "2_final_corpus.yaml"
     write_yaml(final_yaml_path, final_corpus)
-    write_json(project_dir / "2_final_corpus.json", final_corpus)
+    write_json(stage2_internal_json_path(project_dir, "2_final_corpus.json"), final_corpus)
 
     logger.info(
         "阶段2.3-2.4完成: consensus=%s disputed=%s verified=%s final=%s",

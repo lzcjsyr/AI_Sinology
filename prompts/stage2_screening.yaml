@@ -1,12 +1,12 @@
 metadata:
   step: stage2_screening
-  purpose: 对单条史料片段进行主题相关性筛选。
+  purpose: 对批量史料文本进行主题相关性粗筛。
 
 variables:
   themes_block: 主题列表文本（含 T1/T2/... 编号）。
-  piece_id: 史料切片唯一标识。
+  batch_id: 粗筛批次唯一标识。
   source_file: 来源文件名。
-  original_text: 史料原文。
+  batch_text: 合并后的史料正文。
 
 prompt:
   system: |
@@ -17,25 +17,27 @@ prompt:
       "matches": [
         {
           "theme_id": "T1",
-          "theme": "主题名",
           "is_relevant": true,
           "reason": "相关原因",
-          "relevance_level": "HIGH"
+          "target_span": "最短意群复述",
+          "related_spans": ["补充线索1", "补充线索2"]
         }
       ]
     }
     约束：
     1) 每个主题都必须返回一条 matches 记录。
     2) theme_id 必须严格使用输入里的 T1/T2/...，不得自造或改写。
-    3) 若 is_relevant=false，则 reason 与 relevance_level 必须为 null。
-    4) relevance_level 仅允许 HIGH / MEDIUM / LOW / null。
+    3) 不要返回 theme、主题名或其他额外字段。
+    4) 若 is_relevant=false，则 reason=null，target_span=null，related_spans=[]。
+    5) 若 is_relevant=true，则 reason 必须为非空字符串，target_span 必须为非空字符串，related_spans 必须为数组。
+    6) target_span 和 related_spans 应尽量贴近原文中的连续关键词，便于后续定位；不要输出整句照抄，也不要做过度意译。
   user_template: |
-    你是古籍史料筛选助手。请判断该史料对各主题的相关性。
+    你是古籍史料筛选助手。请判断该批史料对各主题的相关性。
 
     目标主题：
     ${themes_block}
 
-    史料片段 piece_id=${piece_id}
+    粗筛批次 batch_id=${batch_id}
     source_file=${source_file}
-    original_text=
-    ${original_text}
+    batch_text=
+    ${batch_text}

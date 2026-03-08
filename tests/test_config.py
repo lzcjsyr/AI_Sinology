@@ -52,6 +52,7 @@ ENV_KEYS_TO_CLEAR = [
     "STAGE2_SYNC_MODE",
     "STAGE2_FRAGMENT_MAX_ATTEMPTS",
     "STAGE2_MAX_EMPTY_RETRIES",
+    "STAGE2_SCREENING_BATCH_MAX_CHARS",
 ]
 
 
@@ -116,6 +117,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.stage2_llm2.tpm, 5000000)
         self.assertEqual(config.stage2_fragment_max_attempts, 3)
         self.assertEqual(config.stage2_max_empty_retries, 2)
+        self.assertEqual(config.stage2_screening_batch_max_chars, 300)
 
     def test_validate_api_reports_missing_provider_keys(self) -> None:
         config = self._load_with_env_file(
@@ -143,6 +145,7 @@ class AppConfigTests(unittest.TestCase):
             STAGE2_SYNC_MAX_AHEAD=64
             STAGE2_FRAGMENT_MAX_ATTEMPTS=5
             STAGE2_MAX_EMPTY_RETRIES=4
+            STAGE2_SCREENING_BATCH_MAX_CHARS=360
             STAGE2_LLM1_RPM=1200
             STAGE2_LLM1_TPM=240000
             STAGE2_LLM2_RPM=32000
@@ -157,6 +160,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.stage2_sync_max_ahead, 64)
         self.assertEqual(config.stage2_fragment_max_attempts, 5)
         self.assertEqual(config.stage2_max_empty_retries, 4)
+        self.assertEqual(config.stage2_screening_batch_max_chars, 360)
         self.assertEqual(config.stage2_llm1.rpm, 1200)
         self.assertEqual(config.stage2_llm1.tpm, 240000)
         self.assertEqual(config.stage2_llm2.rpm, 32000)
