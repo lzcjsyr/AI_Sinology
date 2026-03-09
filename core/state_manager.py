@@ -24,7 +24,7 @@ STAGE_STATUS_EMOJIS = {
 
 STAGE_COMPLETION_ARTIFACTS = {
     1: ["1_research_proposal.md"],
-    2: ["2_final_corpus.yaml"],
+    2: ["2_final_corpus.yaml", "2_final_corpus.json", "_internal/stage2/2_final_corpus.json"],
     3: ["3_outline_matrix.yaml"],
     4: ["4_first_draft.md"],
     5: ["5_final_manuscript.docx"],

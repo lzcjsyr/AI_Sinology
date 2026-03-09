@@ -18,17 +18,24 @@ prompt:
       "matches": [
         {
           "theme_id": "T1",
-          "relevant_piece_ids": ["pb:..."],
-          "reason": "最终定位理由"
+          "evidence_groups": [
+            {
+              "piece_ids": ["pb:..."],
+              "anchor_text": "文本锚点",
+              "reason": "该证据组为何支持主题"
+            }
+          ]
         }
       ]
     }
     约束：
     1) 你只处理输入里列出的主题，每个主题都必须返回一条 matches 记录。
-    2) relevant_piece_ids 只能从给定的 piece_catalog_json 中选择，禁止编造。
-    3) 若一个主题跨越多个相邻片段，应返回最小必要的 piece_id 数组。
-    4) 若一个主题只落在一个片段，relevant_piece_ids 只返回那一个 piece_id。
-    5) reason 必须是非空字符串，说明这些 piece_id 为什么是最小且足够的证据范围。
+    2) evidence_groups 必须是非空数组；每个组都表示一个独立证据块。
+    3) 每个 evidence_group 的 piece_ids 只能从给定的 piece_catalog_json 中选择，禁止编造。
+    4) 若一个证据块只落在一个片段，piece_ids 只返回那一个 piece_id；若跨多个相邻片段才完整成立，可在同一组中返回多个 piece_id。
+    5) 若同一主题分散在多个不相邻 piece，必须拆成多个 evidence_group，而不是强行合并成一个组。
+    6) 同一个 piece_id 在同一主题下只能出现一次，不得在多个组重复。
+    7) 每个组的 anchor_text 与 reason 都必须为非空字符串。
   user_template: |
     你是古籍史料精确定位助手。请对下列已经粗筛命中的主题，定位到最小必要的原始 piece_id。
 

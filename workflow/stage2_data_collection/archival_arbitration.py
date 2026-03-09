@@ -36,7 +36,13 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         "reason": chosen_reason or "双模型一致判定相关",
         "screening_batch_id": _pick_shared_field(a, b, "screening_batch_id"),
         "localization_method": _pick_shared_field(a, b, "localization_method"),
-        "target_span": _pick_shared_field(a, b, "target_span"),
+        "localization_bundle_id": _pick_shared_field(a, b, "localization_bundle_id"),
+        "localization_group_index": _pick_shared_field(a, b, "localization_group_index"),
+        "localization_group_count": _pick_shared_field(a, b, "localization_group_count"),
+        "localization_group_piece_ids": _pick_shared_field(a, b, "localization_group_piece_ids"),
+        "all_localized_piece_ids": _pick_shared_field(a, b, "all_localized_piece_ids"),
+        "localization_scope": _pick_shared_field(a, b, "localization_scope"),
+        "anchor_text": _pick_shared_field(a, b, "anchor_text"),
     }
 
 
@@ -58,16 +64,28 @@ def _dispute_side(record: dict[str, Any] | None) -> dict[str, Any]:
         return {
             "is_relevant": False,
             "reason": None,
-            "target_span": None,
             "localization_method": None,
             "screening_batch_id": None,
+            "localization_bundle_id": None,
+            "localization_group_index": None,
+            "localization_group_count": None,
+            "localization_group_piece_ids": None,
+            "all_localized_piece_ids": None,
+            "localization_scope": None,
+            "anchor_text": None,
         }
     return {
         "is_relevant": bool(record.get("is_relevant")),
         "reason": record.get("reason") if record.get("is_relevant") else None,
-        "target_span": record.get("target_span") if record.get("is_relevant") else None,
         "localization_method": record.get("localization_method"),
         "screening_batch_id": record.get("screening_batch_id"),
+        "localization_bundle_id": record.get("localization_bundle_id"),
+        "localization_group_index": record.get("localization_group_index"),
+        "localization_group_count": record.get("localization_group_count"),
+        "localization_group_piece_ids": record.get("localization_group_piece_ids"),
+        "all_localized_piece_ids": record.get("all_localized_piece_ids"),
+        "localization_scope": record.get("localization_scope"),
+        "anchor_text": record.get("anchor_text") if record.get("is_relevant") else None,
     }
 
 
@@ -315,6 +333,24 @@ async def run_archival_arbitration(
                 "matched_theme": dispute["matched_theme"],
                 "is_relevant": True,
                 "reason": result.get("reason") or "仲裁判定相关",
+                "screening_batch_id": dispute["llm1_result"].get("screening_batch_id")
+                or dispute["llm2_result"].get("screening_batch_id"),
+                "localization_method": dispute["llm1_result"].get("localization_method")
+                or dispute["llm2_result"].get("localization_method"),
+                "localization_bundle_id": dispute["llm1_result"].get("localization_bundle_id")
+                or dispute["llm2_result"].get("localization_bundle_id"),
+                "localization_group_index": dispute["llm1_result"].get("localization_group_index")
+                or dispute["llm2_result"].get("localization_group_index"),
+                "localization_group_count": dispute["llm1_result"].get("localization_group_count")
+                or dispute["llm2_result"].get("localization_group_count"),
+                "localization_group_piece_ids": dispute["llm1_result"].get("localization_group_piece_ids")
+                or dispute["llm2_result"].get("localization_group_piece_ids"),
+                "all_localized_piece_ids": dispute["llm1_result"].get("all_localized_piece_ids")
+                or dispute["llm2_result"].get("all_localized_piece_ids"),
+                "localization_scope": dispute["llm1_result"].get("localization_scope")
+                or dispute["llm2_result"].get("localization_scope"),
+                "anchor_text": dispute["llm1_result"].get("anchor_text")
+                or dispute["llm2_result"].get("anchor_text"),
             }
 
     await asyncio.gather(*[_worker(i, dispute) for i, dispute in enumerate(disputes)])

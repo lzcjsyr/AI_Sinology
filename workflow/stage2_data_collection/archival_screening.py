@@ -5,7 +5,6 @@ import json
 import random
 import shutil
 import sys
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -146,23 +145,11 @@ def _build_screening_batches(
 
         batch_index = len(batches) + 1
         parts: list[str] = []
-        piece_offsets: list[dict[str, Any]] = []
-        cursor = 0
         for idx, fragment in enumerate(current):
             text = str(fragment.get("original_text") or "")
             if idx > 0:
                 parts.append("\n")
-                cursor += 1
-            start = cursor
             parts.append(text)
-            cursor += len(text)
-            piece_offsets.append(
-                {
-                    "piece_id": str(fragment.get("piece_id") or ""),
-                    "start": start,
-                    "end": cursor,
-                }
-            )
 
         batches.append(
             {
@@ -171,7 +158,6 @@ def _build_screening_batches(
                 "piece_ids": [str(fragment.get("piece_id") or "") for fragment in current],
                 "batch_text": "".join(parts),
                 "char_count": current_char_count,
-                "piece_offsets": piece_offsets,
             }
         )
         current = []
@@ -299,27 +285,11 @@ def _normalize_matches_strict(
         else:
             raise ValueError(f"主题 `{theme_id}` 的 is_relevant 不是布尔值")
 
-        reason = src.get("reason")
-        target_span = src.get("target_span")
-
-        if not is_relevant:
-            reason = None
-            target_span = None
-        else:
-            reason = str(reason or "").strip()
-            if not reason:
-                raise ValueError(f"主题 `{theme_id}` 判定为相关但缺少 reason")
-            target_span = str(target_span or "").strip()
-            if not target_span:
-                raise ValueError(f"主题 `{theme_id}` 判定为相关但缺少 target_span")
-
         result.append(
             {
                 "theme": theme,
                 "theme_id": theme_id,
                 "is_relevant": is_relevant,
-                "reason": reason,
-                "target_span": target_span,
             }
         )
 
@@ -355,38 +325,66 @@ def _normalize_refined_matches(
             missing.append(theme_id)
             continue
 
-        raw_piece_ids = src.get("relevant_piece_ids")
-        if not isinstance(raw_piece_ids, list):
-            raise ValueError(f"主题 `{theme_id}` 缺少 relevant_piece_ids 数组")
+        raw_groups = src.get("evidence_groups")
+        if not isinstance(raw_groups, list):
+            raise ValueError(f"主题 `{theme_id}` 缺少 evidence_groups 数组")
 
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for piece_id in raw_piece_ids:
-            value = str(piece_id or "").strip()
-            if not value or value in seen:
-                continue
-            if value not in piece_order:
-                raise ValueError(f"主题 `{theme_id}` 返回了批次外的 piece_id: {value}")
-            seen.add(value)
-            deduped.append(value)
-        if not deduped:
-            raise ValueError(f"主题 `{theme_id}` 的 relevant_piece_ids 为空")
+        normalized_groups: list[dict[str, Any]] = []
+        seen_piece_ids: set[str] = set()
+        for group_index, raw_group in enumerate(raw_groups, start=1):
+            if not isinstance(raw_group, dict):
+                raise ValueError(f"主题 `{theme_id}` 的 evidence_group[{group_index}] 不是对象")
 
-        ordered = sorted(deduped, key=lambda item: piece_order[item])
-        positions = [piece_order[item] for item in ordered]
-        if positions[-1] - positions[0] + 1 != len(positions):
-            raise ValueError(f"主题 `{theme_id}` 的 relevant_piece_ids 必须连续")
+            raw_piece_ids = raw_group.get("piece_ids")
+            if not isinstance(raw_piece_ids, list):
+                raise ValueError(f"主题 `{theme_id}` 的 evidence_group[{group_index}] 缺少 piece_ids")
 
-        reason = str(src.get("reason") or "").strip()
-        if not reason:
-            raise ValueError(f"主题 `{theme_id}` 缺少定位 reason")
+            deduped: list[str] = []
+            local_seen: set[str] = set()
+            for piece_id in raw_piece_ids:
+                value = str(piece_id or "").strip()
+                if not value or value in local_seen:
+                    continue
+                if value not in piece_order:
+                    raise ValueError(f"主题 `{theme_id}` 返回了批次外的 piece_id: {value}")
+                if value in seen_piece_ids:
+                    raise ValueError(f"主题 `{theme_id}` 的 piece_id 重复出现在多个证据组: {value}")
+                local_seen.add(value)
+                deduped.append(value)
+                seen_piece_ids.add(value)
+            if not deduped:
+                raise ValueError(f"主题 `{theme_id}` 的 evidence_group[{group_index}] piece_ids 为空")
+
+            ordered = sorted(deduped, key=lambda item: piece_order[item])
+            anchor_text = str(raw_group.get("anchor_text") or "").strip()
+            if not anchor_text:
+                raise ValueError(f"主题 `{theme_id}` 的 evidence_group[{group_index}] 缺少 anchor_text")
+
+            reason = str(raw_group.get("reason") or "").strip()
+            if not reason:
+                raise ValueError(f"主题 `{theme_id}` 的 evidence_group[{group_index}] 缺少 reason")
+
+            positions = [piece_order[item] for item in ordered]
+            is_contiguous = positions[-1] - positions[0] + 1 == len(positions)
+            normalized_groups.append(
+                {
+                    "piece_ids": ordered,
+                    "anchor_text": anchor_text,
+                    "reason": reason,
+                    "is_contiguous": is_contiguous,
+                }
+            )
+
+        if not normalized_groups:
+            raise ValueError(f"主题 `{theme_id}` 的 evidence_groups 为空")
+
+        normalized_groups.sort(key=lambda group: piece_order[group["piece_ids"][0]])
 
         result.append(
             {
                 "theme": coarse_match["theme"],
                 "theme_id": theme_id,
-                "relevant_piece_ids": ordered,
-                "reason": reason,
+                "evidence_groups": normalized_groups,
             }
         )
 
@@ -667,67 +665,6 @@ class _InlineScreeningProgress:
         self._stream.write("\r\033[2K\n")
         self._stream.flush()
 
-
-def _matchable_char(ch: str) -> bool:
-    category = unicodedata.category(ch)
-    return category.startswith("L") or category.startswith("N")
-
-
-def _normalize_text_with_map(text: str) -> tuple[str, list[int]]:
-    normalized_chars: list[str] = []
-    index_map: list[int] = []
-    for idx, ch in enumerate(str(text)):
-        if not _matchable_char(ch):
-            continue
-        normalized_chars.append(ch.lower())
-        index_map.append(idx)
-    return "".join(normalized_chars), index_map
-
-
-def _normalize_match_query(text: str) -> str:
-    return "".join(ch.lower() for ch in str(text) if _matchable_char(ch))
-
-
-def _find_candidate_piece_ids(
-    *,
-    batch_text: str,
-    piece_offsets: list[dict[str, Any]],
-    candidate_text: str,
-) -> list[str]:
-    normalized_candidate = _normalize_match_query(candidate_text)
-    if len(normalized_candidate) < 2:
-        return []
-
-    normalized_batch, index_map = _normalize_text_with_map(batch_text)
-    if not normalized_batch:
-        return []
-
-    matched_piece_ids: list[str] = []
-    seen_piece_ids: set[str] = set()
-    search_start = 0
-    while True:
-        found = normalized_batch.find(normalized_candidate, search_start)
-        if found < 0:
-            break
-        start = index_map[found]
-        end = index_map[found + len(normalized_candidate) - 1] + 1
-        piece_ids: list[str] = []
-        for item in piece_offsets:
-            piece_id = str(item.get("piece_id") or "")
-            piece_start = int(item.get("start") or 0)
-            piece_end = int(item.get("end") or 0)
-            if max(start, piece_start) < min(end, piece_end):
-                piece_ids.append(piece_id)
-        for piece_id in piece_ids:
-            if piece_id in seen_piece_ids:
-                continue
-            seen_piece_ids.add(piece_id)
-            matched_piece_ids.append(piece_id)
-        search_start = found + 1
-
-    return matched_piece_ids
-
-
 def _build_themes_block(target_themes: list[dict[str, str]]) -> str:
     return "\n".join(
         f"- T{i+1} | theme: {t['theme']} | description: {t.get('description', '')}"
@@ -742,13 +679,23 @@ def _build_unresolved_themes_block(unresolved_matches: list[dict[str, Any]]) -> 
                 [
                     f"{match['theme_id']}",
                     f"theme={match['theme']}",
-                    f"reason={match['reason']}",
-                    f"target_span={match['target_span']}",
                 ]
             )
             for match in unresolved_matches
         ]
     )
+
+
+def _localization_scope(piece_ids: list[str], *, is_contiguous: bool) -> str:
+    if len(piece_ids) <= 1:
+        return "single"
+    if is_contiguous:
+        return "multi_contiguous"
+    return "multi_discontiguous"
+
+
+def _bundle_id(batch: dict[str, Any], theme_id: str) -> str:
+    return f"{batch['batch_id']}::{theme_id}"
 
 
 async def _classify_fragment_strict(
@@ -961,8 +908,15 @@ def _build_positive_record(
     batch: dict[str, Any],
     fragment: dict[str, str],
     match: dict[str, Any],
-    reason: str,
     localization_method: str,
+    bundle_id: str,
+    group_piece_ids: list[str],
+    all_piece_ids: list[str],
+    group_index: int,
+    group_count: int,
+    reason: str,
+    anchor_text: str,
+    is_contiguous: bool,
 ) -> dict[str, Any]:
     return {
         "piece_id": fragment["piece_id"],
@@ -973,7 +927,13 @@ def _build_positive_record(
         "reason": reason,
         "screening_batch_id": batch["batch_id"],
         "localization_method": localization_method,
-        "target_span": match.get("target_span"),
+        "localization_bundle_id": bundle_id,
+        "localization_group_index": group_index,
+        "localization_group_count": group_count,
+        "localization_group_piece_ids": list(group_piece_ids),
+        "all_localized_piece_ids": list(all_piece_ids),
+        "localization_scope": _localization_scope(group_piece_ids, is_contiguous=is_contiguous),
+        "anchor_text": anchor_text,
     }
 
 
@@ -1002,7 +962,6 @@ def _build_failed_records(
                     "reason": None,
                     "screening_batch_id": batch["batch_id"],
                     "localization_method": "screening_error",
-                    "target_span": None,
                     "screening_error": error_text,
                 }
             )
@@ -1055,48 +1014,23 @@ async def _screen_batch_strict(
         piece_id = batch["piece_ids"][0]
         fragment = fragment_map[piece_id]
         for match in relevant_matches:
+            bundle_id = _bundle_id(batch, str(match["theme_id"]))
             records.append(
                 _build_positive_record(
                     batch=batch,
                     fragment=fragment,
                     match=match,
-                    reason=str(match.get("reason") or ""),
-                    localization_method="single_piece",
+                    localization_method="single_piece_batch",
+                    bundle_id=bundle_id,
+                    group_piece_ids=[piece_id],
+                    all_piece_ids=[piece_id],
+                    group_index=1,
+                    group_count=1,
+                    reason="batch 仅含单个 piece，相关主题直接落到该片段。",
+                    anchor_text=str(fragment.get("original_text") or "")[:80] or piece_id,
+                    is_contiguous=True,
                 )
             )
-        return BatchScreeningResult(
-            records=records,
-            usage=coarse_usage,
-            control_stats=control_stats,
-            used_refine=False,
-        )
-
-    unresolved: list[dict[str, Any]] = []
-    for match in relevant_matches:
-        localized_piece_ids = _find_candidate_piece_ids(
-            batch_text=batch["batch_text"],
-            piece_offsets=batch["piece_offsets"],
-            candidate_text=str(match.get("target_span") or ""),
-        )
-        if not localized_piece_ids:
-            unresolved.append(match)
-            continue
-
-        for piece_id in localized_piece_ids:
-            fragment = fragment_map.get(piece_id)
-            if not fragment:
-                continue
-            records.append(
-                _build_positive_record(
-                    batch=batch,
-                    fragment=fragment,
-                    match=match,
-                    reason=str(match.get("reason") or ""),
-                    localization_method="regex",
-                )
-            )
-
-    if not unresolved:
         return BatchScreeningResult(
             records=records,
             usage=coarse_usage,
@@ -1110,7 +1044,7 @@ async def _screen_batch_strict(
         llm_endpoint=llm_endpoint,
         prompt_spec=refine_prompt_spec,
         batch=batch,
-        unresolved_matches=unresolved,
+        unresolved_matches=relevant_matches,
         fragment_map=fragment_map,
         logger=logger,
         max_attempts=max_attempts,
@@ -1122,23 +1056,36 @@ async def _screen_batch_strict(
     control_stats.absorb(refine_stats)
 
     coarse_by_theme_id = {
-        str(match.get("theme_id") or "").strip().upper(): match for match in unresolved
+        str(match.get("theme_id") or "").strip().upper(): match for match in relevant_matches
     }
     for refined_match in refined_matches:
         coarse_match = coarse_by_theme_id[str(refined_match["theme_id"]).upper()]
-        for piece_id in refined_match["relevant_piece_ids"]:
-            fragment = fragment_map.get(piece_id)
-            if not fragment:
-                continue
-            records.append(
-                _build_positive_record(
-                    batch=batch,
-                    fragment=fragment,
-                    match=coarse_match,
-                    reason=str(refined_match.get("reason") or ""),
-                    localization_method="llm_refine",
+        evidence_groups = list(refined_match["evidence_groups"])
+        all_piece_ids = [
+            piece_id for group in evidence_groups for piece_id in group["piece_ids"]
+        ]
+        bundle_id = _bundle_id(batch, str(refined_match["theme_id"]))
+        for group_index, group in enumerate(evidence_groups, start=1):
+            for piece_id in group["piece_ids"]:
+                fragment = fragment_map.get(piece_id)
+                if not fragment:
+                    continue
+                records.append(
+                    _build_positive_record(
+                        batch=batch,
+                        fragment=fragment,
+                        match=coarse_match,
+                        localization_method="llm_evidence_groups",
+                        bundle_id=bundle_id,
+                        group_piece_ids=group["piece_ids"],
+                        all_piece_ids=all_piece_ids,
+                        group_index=group_index,
+                        group_count=len(evidence_groups),
+                        reason=str(group["reason"]),
+                        anchor_text=str(group["anchor_text"]),
+                        is_contiguous=bool(group["is_contiguous"]),
+                    )
                 )
-            )
 
     return BatchScreeningResult(
         records=records,

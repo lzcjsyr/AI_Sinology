@@ -92,39 +92,45 @@ target_themes:
 
 **1. 大模型 (LLM) 结构化输出部分**：
 考虑到一段史料需要针对多个目标主题进行判定，LLM 被要求返回一个**包含所有预定义主题判定结果的数组列（Array）**。
-LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piece_id` 等已知信息。为了节省 Token，**无论是否相关，`is_relevant` 字段必须真实输出**。但如果判定为不相关（`is_relevant: false`），则**无需输出理由，直接省去或置空 `reason` 和 `relevance_level` 字段**：
+LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piece_id` 等已知信息。为了节省 Token，**无论是否相关，`is_relevant` 字段必须真实输出**。粗筛只负责判定“该 batch 与主题是否相关”，因此**不输出 reason 或其他说明字段**：
 
 ```json
 {
   "matches": [
     {
-      "theme": "string",              // 需判定的目标主题名
-      "is_relevant": boolean,         // 必须输出。相关为 true，不相关为 false
-      "reason": "string | null",      // 说明理由。若 is_relevant 为 false，此字段可为 null 或省略
-      "relevance_level": "string | null"  // 若 is_relevant 为 false，此字段可为 null 或省略
+      "theme_id": "string",           // 需判定的目标主题编号，如 T1
+      "is_relevant": boolean          // 必须输出。相关为 true，不相关为 false
     }
   ]
 }
 ```
 
 **2. 落盘文件 (`2_llm1_raw.jsonl` 和 `2_llm2_raw.jsonl`) 的完整单行 Schema**：
-调度的纯 Python 脚本（`archival_screening.py`）在接收到 LLM 数组后，**以该数组内的每一个 `theme` 为基本单位**做对象扁平铺开。
-脚本在内存中直接将其与上游生成的 `piece_id`、`source_file` 和 `original_text` 缝合。如果某个主题的判定为不相关，依然会生成一条记录（记录其 `is_relevant: false`），以供下游比对：
+调度的纯 Python 脚本（`archival_screening.py`）在接收到粗筛数组后，会对每个**相关主题**发起二次定位，要求 LLM 返回该主题在 batch 内的 `evidence_groups`。每个证据组内部可以覆盖一个或多个相邻 piece，不同证据组之间允许不相邻。
+脚本最终仍以 `(piece_id, matched_theme)` 为最小落盘单位，但会把同一主题的证据组元数据一并写入，以便下游仲裁和人工审计：
 
 ```json
 {
   "piece_id": "string",           // 代码直接注入
   "source_file": "string",        // 代码直接注入
   "original_text": "string",      // 代码直接注入
-  "matched_theme": "string",      // 拆解自 LLM 返回的 theme
-  "is_relevant": boolean,         // 拆解自 LLM 返回的 boolean (true/false)
-  "reason": "string | null",      // 拆解自 LLM 返回的理由或 null
-  "relevance_level": "string | null" // 拆解自 LLM 返回的评级或 null
+  "matched_theme": "string",      // 拆解自主题配置中的 theme
+  "is_relevant": true,            // 只落盘命中结果；失败兜底时才写 false
+  "reason": "string",             // 当前 evidence_group 对该 piece 的理由
+  "anchor_text": "string",        // 当前 evidence_group 的文本锚点
+  "screening_batch_id": "string",
+  "localization_method": "string",
+  "localization_bundle_id": "string",
+  "localization_group_index": 1,
+  "localization_group_count": 2,
+  "localization_group_piece_ids": ["piece_a"],
+  "all_localized_piece_ids": ["piece_a", "piece_c"],
+  "localization_scope": "single | multi_contiguous | multi_discontiguous"
 }
 ```
 
 > [!TIP]
-> **Token 开销与速度优化：** 将大模型输出字段与最终落盘文件 Schema 解耦，大模型一次只需要输出几个极短的判定字段。对于不相关的主题，通过省略 `reason` 字段完美规避了长文本生成的 Token 开销。这成倍加快了生成速度，并且使得下游（阶段2.3）的文件由于天然带有 `is_relevant` 字段，可直接依赖其进行清晰严密的布尔判断和差集比对。
+> **Token 开销与速度优化：** 粗筛与精定位解耦后，第一轮只回答“是否相关”，第二轮只针对命中主题定位证据组。这避免了在粗筛阶段为所有主题生成长文本定位说明，同时又能覆盖“同一主题跨多个 piece、且关键词不同”的情况。
 
 ## 阶段 2.3：共识与争议分流 (Consensus & Dispute Shunting)
 
@@ -144,7 +150,7 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 完全继承单条原格式，只保留双盲判定一致的档案。
 **判定共识（Consensus）的标准（细化至“Theme”维度）**：
 
-- **明确共识**：基于同一个 `piece_id`，只要 LLM1 与 LLM2 的记录中**均包含同一个 `theme` 且 `is_relevant` 均为 `true`**，即在该主题上达成共识。共识的获取**不考虑**相关等级（`relevance_level`）或理由差异，只要“主题”和“是否相关”两个字段匹配即可写入共识档案。
+- **明确共识**：基于同一个 `piece_id`，只要 LLM1 与 LLM2 的记录中**均包含同一个 `theme` 且 `is_relevant` 均为 `true`**，即在该主题上达成共识。共识的获取**不考虑**定位理由或证据组差异，只要“主题”和“是否相关”两个字段匹配即可写入共识档案。
 - **彻底无关**：基于同一个 `piece_id` 和特定的 `theme`，若双侧模型的记录中 **`is_relevant` 均为 `false`**，即视该史料片段在该主题下无价值，直接丢弃（不写入任何档案）。若该片段针对所有目标主题的双侧判定均为 `false`，则该史料片段被彻底抛弃。
 
 ```yaml
@@ -155,7 +161,9 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   matched_theme: "商人形象"
   is_relevant: true
   reason: "明确描写了市井商人的聚集场景。"
-  relevance_level: "HIGH"
+  localization_bundle_id: "batch_00000001::T1"
+  localization_scope: "single"
+  anchor_text: "商贾云集"
 ```
 
 **存在分歧的档案 `2_disputed_data.yaml` 数据结构**：
@@ -171,11 +179,11 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   matched_theme: "商人形象"       # 该主题只有一方认为相关
   llm1_result: 
     is_relevant: true
-    relevance_level: "LOW"
     reason: "提到游手好闲聚众人员，也许暗含着市井人员的初步集结。"
+    localization_scope: "single"
+    anchor_text: "游手无赖之徒"
   llm2_result:
     is_relevant: false
-    relevance_level: null
     reason: null                  # 忠实于 LLM2 在阶段 2.2 时输出的无理由不相关判定
 ```
 
@@ -187,11 +195,11 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   matched_theme: "祈雨"
   llm1_result: 
     is_relevant: true
-    relevance_level: "HIGH"
     reason: "包含明确的祈雨情况与求雨目的。"
+    localization_scope: "single"
+    anchor_text: "使祈雨"
   llm2_result:
     is_relevant: false
-    relevance_level: null
     reason: null                  # 忠实于 LLM 输出的无理由不相关判定
 ```
 
@@ -229,7 +237,9 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   is_relevant: true
   reason: |
     明确描写了市井商人的聚集场景，能够佐证晚明城市经济的繁荣，符合商人形象的主题要求。
-  relevance_level: "HIGH"
+  localization_bundle_id: "batch_00000001::T1"
+  localization_scope: "single"
+  anchor_text: "商贾云集"
 ```
 
 ---
