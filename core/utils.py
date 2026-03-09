@@ -192,6 +192,21 @@ def parse_target_themes_from_proposal(proposal_path: Path) -> list[dict[str, str
     return themes
 
 
+def parse_idea_from_proposal(proposal_path: Path) -> str:
+    text = read_text(proposal_path)
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if stripped.startswith("idea:"):
+            return stripped.split(":", 1)[1].strip().strip('"')
+    return ""
+
+
 def _yaml_escape(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
@@ -261,8 +276,15 @@ def write_yaml(path: Path, data: Any) -> None:
     write_text(path, dump_yaml(data))
 
 
-def markdown_front_matter(target_themes: list[dict[str, str]]) -> str:
-    lines = ["---", "target_themes:"]
+def markdown_front_matter(
+    target_themes: list[dict[str, str]],
+    *,
+    idea: str | None = None,
+) -> str:
+    lines = ["---"]
+    if idea and idea.strip():
+        lines.append(f'idea: "{idea.strip()}"')
+    lines.append("target_themes:")
     for item in target_themes:
         theme = item.get("theme", "").strip()
         desc = item.get("description", "").strip()

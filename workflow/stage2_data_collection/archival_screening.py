@@ -301,18 +301,10 @@ def _normalize_matches_strict(
 
         reason = src.get("reason")
         target_span = src.get("target_span")
-        related_spans_raw = src.get("related_spans")
-        related_spans: list[str] = []
-        if isinstance(related_spans_raw, list):
-            for item in related_spans_raw:
-                text = str(item or "").strip()
-                if text:
-                    related_spans.append(text)
 
         if not is_relevant:
             reason = None
             target_span = None
-            related_spans = []
         else:
             reason = str(reason or "").strip()
             if not reason:
@@ -328,7 +320,6 @@ def _normalize_matches_strict(
                 "is_relevant": is_relevant,
                 "reason": reason,
                 "target_span": target_span,
-                "related_spans": related_spans,
             }
         )
 
@@ -711,7 +702,8 @@ def _find_candidate_piece_ids(
     if not normalized_batch:
         return []
 
-    resolved_sets: list[tuple[str, ...]] = []
+    matched_piece_ids: list[str] = []
+    seen_piece_ids: set[str] = set()
     search_start = 0
     while True:
         found = normalized_batch.find(normalized_candidate, search_start)
@@ -726,20 +718,14 @@ def _find_candidate_piece_ids(
             piece_end = int(item.get("end") or 0)
             if max(start, piece_start) < min(end, piece_end):
                 piece_ids.append(piece_id)
-        if piece_ids:
-            resolved_sets.append(tuple(piece_ids))
+        for piece_id in piece_ids:
+            if piece_id in seen_piece_ids:
+                continue
+            seen_piece_ids.add(piece_id)
+            matched_piece_ids.append(piece_id)
         search_start = found + 1
 
-    unique_sets: list[tuple[str, ...]] = []
-    seen: set[tuple[str, ...]] = set()
-    for item in resolved_sets:
-        if item in seen:
-            continue
-        seen.add(item)
-        unique_sets.append(item)
-    if len(unique_sets) != 1:
-        return []
-    return list(unique_sets[0])
+    return matched_piece_ids
 
 
 def _build_themes_block(target_themes: list[dict[str, str]]) -> str:
@@ -758,7 +744,6 @@ def _build_unresolved_themes_block(unresolved_matches: list[dict[str, Any]]) -> 
                     f"theme={match['theme']}",
                     f"reason={match['reason']}",
                     f"target_span={match['target_span']}",
-                    f"related_spans={json.dumps(match['related_spans'], ensure_ascii=False)}",
                 ]
             )
             for match in unresolved_matches
@@ -989,7 +974,6 @@ def _build_positive_record(
         "screening_batch_id": batch["batch_id"],
         "localization_method": localization_method,
         "target_span": match.get("target_span"),
-        "related_spans": list(match.get("related_spans") or []),
     }
 
 
@@ -1019,7 +1003,6 @@ def _build_failed_records(
                     "screening_batch_id": batch["batch_id"],
                     "localization_method": "screening_error",
                     "target_span": None,
-                    "related_spans": [],
                     "screening_error": error_text,
                 }
             )
@@ -1095,16 +1078,6 @@ async def _screen_batch_strict(
             piece_offsets=batch["piece_offsets"],
             candidate_text=str(match.get("target_span") or ""),
         )
-        if not localized_piece_ids:
-            for span in list(match.get("related_spans") or []):
-                localized_piece_ids = _find_candidate_piece_ids(
-                    batch_text=batch["batch_text"],
-                    piece_offsets=batch["piece_offsets"],
-                    candidate_text=span,
-                )
-                if localized_piece_ids:
-                    break
-
         if not localized_piece_ids:
             unresolved.append(match)
             continue

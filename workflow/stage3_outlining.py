@@ -8,7 +8,13 @@ from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.project_paths import resolve_stage2_json_path
 from core.prompt_loader import build_messages, load_prompt
-from core.utils import parse_json_from_text, parse_target_themes_from_proposal, read_json, write_yaml
+from core.utils import (
+    parse_idea_from_proposal,
+    parse_json_from_text,
+    parse_target_themes_from_proposal,
+    read_json,
+    write_yaml,
+)
 
 
 def _collect_piece_ids(corpus: list[dict[str, Any]]) -> set[str]:
@@ -103,13 +109,7 @@ def run_stage3_outlining(
         raise RuntimeError("阶段三无法开始：2_final_corpus 为空")
 
     valid_piece_ids = _collect_piece_ids(corpus)
-    proposal_hint = ""
-    if (project_dir / "1_research_proposal_meta.json").exists():
-        try:
-            meta = read_json(project_dir / "1_research_proposal_meta.json")
-            proposal_hint = str(meta.get("idea") or "")
-        except Exception:  # noqa: BLE001
-            proposal_hint = ""
+    proposal_hint = parse_idea_from_proposal(proposal_path)
 
     corpus_summary_lines = []
     for rec in corpus[:30]:

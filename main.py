@@ -11,7 +11,7 @@ from core import AppConfig, LiteLLMClient, StateManager
 from core.cli_ui import CLIUI
 from core.logger import setup_logger
 from core.state_manager import STAGE_STATUS_COMPLETED, StageProgress
-from core.utils import parse_target_themes_from_proposal, read_json
+from core.utils import parse_idea_from_proposal, parse_target_themes_from_proposal
 from workflow import (
     run_stage1_topic_selection,
     run_stage2_data_collection,
@@ -443,11 +443,11 @@ class _Stage2Runtime:
 
 
 def _load_saved_idea(project_dir: Path) -> str:
-    meta_path = project_dir / "1_research_proposal_meta.json"
-    if not meta_path.exists():
+    proposal_path = project_dir / "1_research_proposal.md"
+    if not proposal_path.exists():
         return ""
     try:
-        return str(read_json(meta_path).get("idea") or "")
+        return parse_idea_from_proposal(proposal_path)
     except Exception:  # noqa: BLE001
         return ""
 

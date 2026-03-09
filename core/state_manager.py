@@ -23,7 +23,7 @@ STAGE_STATUS_EMOJIS = {
 }
 
 STAGE_COMPLETION_ARTIFACTS = {
-    1: ["1_research_proposal_meta.json"],
+    1: ["1_research_proposal.md"],
     2: ["2_final_corpus.yaml"],
     3: ["3_outline_matrix.yaml"],
     4: ["4_first_draft.md"],
@@ -34,6 +34,7 @@ STAGE_IN_PROGRESS_ARTIFACTS = {
     1: ["1_research_proposal.md"],
     2: [
         "2_stage_manifest.json",
+        "_internal/stage2/2_stage_manifest.json",
         "_processed_data/kanripo_fragments.jsonl",
         "_processed_data/kanripo_screening_batches.jsonl",
         "2_llm1_raw.jsonl",
@@ -55,6 +56,7 @@ STAGE_RESET_ARTIFACTS = {
         "_processed_data/kanripo_fragments.jsonl",
         "_processed_data/kanripo_screening_batches.jsonl",
         "2_stage_manifest.json",
+        "_internal/stage2/2_stage_manifest.json",
         "2_llm1_raw.jsonl",
         "2_llm2_raw.jsonl",
         ".cursor_llm1.json",
@@ -161,7 +163,9 @@ class StateManager:
 
     @staticmethod
     def _read_stage2_manifest_status(project_dir: Path) -> str:
-        manifest_path = project_dir / "2_stage_manifest.json"
+        manifest_path = project_dir / "_internal" / "stage2" / "2_stage_manifest.json"
+        if not manifest_path.exists():
+            manifest_path = project_dir / "2_stage_manifest.json"
         if not manifest_path.exists():
             return ""
         try:

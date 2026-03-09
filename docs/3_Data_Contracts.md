@@ -25,6 +25,7 @@
 
 ```yaml
 ---
+idea: "研究晚明通俗小说中的商人形象"
 target_themes:
   - theme: "祈雨"
     description: "包括皇帝和民间百姓通过宗教活动和民间习俗请求降雨..."
@@ -35,6 +36,7 @@ target_themes:
 
 > [!IMPORTANT]
 > `target_themes` 是下游**阶段二的唯一输入基准**。后续主题比对必须与此处键值严格一致 (Exact Match)。
+> `idea` 作为用户原始研究意向的机器可读镜像，也一并固化在同一 Front Matter 中，避免再引入额外的冗余元数据文件。
 
 **2. 正文区 (Markdown)**：
 在 `---` 之后，呈现为标准的学术文本：

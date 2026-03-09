@@ -27,8 +27,6 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     reason_b = str(b.get("reason") or "")
     chosen_reason = reason_a if len(reason_a) >= len(reason_b) else reason_b
 
-    related_spans = list(a.get("related_spans") or []) or list(b.get("related_spans") or [])
-
     return {
         "piece_id": a["piece_id"],
         "source_file": _pick_shared_field(a, b, "source_file"),
@@ -39,7 +37,6 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         "screening_batch_id": _pick_shared_field(a, b, "screening_batch_id"),
         "localization_method": _pick_shared_field(a, b, "localization_method"),
         "target_span": _pick_shared_field(a, b, "target_span"),
-        "related_spans": related_spans,
     }
 
 
@@ -62,7 +59,6 @@ def _dispute_side(record: dict[str, Any] | None) -> dict[str, Any]:
             "is_relevant": False,
             "reason": None,
             "target_span": None,
-            "related_spans": [],
             "localization_method": None,
             "screening_batch_id": None,
         }
@@ -70,7 +66,6 @@ def _dispute_side(record: dict[str, Any] | None) -> dict[str, Any]:
         "is_relevant": bool(record.get("is_relevant")),
         "reason": record.get("reason") if record.get("is_relevant") else None,
         "target_span": record.get("target_span") if record.get("is_relevant") else None,
-        "related_spans": list(record.get("related_spans") or []) if record.get("is_relevant") else [],
         "localization_method": record.get("localization_method"),
         "screening_batch_id": record.get("screening_batch_id"),
     }

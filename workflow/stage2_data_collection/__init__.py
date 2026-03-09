@@ -8,6 +8,7 @@ from core.config import LLMEndpointConfig
 from core.llm_client import OpenAICompatClient
 from core.project_paths import (
     resolve_stage2_internal_path,
+    resolve_stage2_manifest_path,
     resolve_stage2_json_path,
     stage2_internal_dir,
 )
@@ -21,9 +22,6 @@ from workflow.stage2_data_collection.data_ingestion.parse_kanripo import (
     list_available_scopes,
     parse_kanripo_to_fragments,
 )
-
-MANIFEST_FILE = "2_stage_manifest.json"
-
 
 def _signature(
     selected_scopes: list[str],
@@ -65,7 +63,7 @@ def _signature(
 
 
 def _read_manifest(project_dir: Path) -> dict[str, Any] | None:
-    path = project_dir / MANIFEST_FILE
+    path = resolve_stage2_manifest_path(project_dir)
     if not path.exists():
         return None
     try:
@@ -78,7 +76,7 @@ def _read_manifest(project_dir: Path) -> dict[str, Any] | None:
 
 
 def _write_manifest(project_dir: Path, payload: dict[str, Any]) -> None:
-    write_json(project_dir / MANIFEST_FILE, payload)
+    write_json(stage2_internal_dir(project_dir) / "2_stage_manifest.json", payload)
 
 
 def read_cached_scopes(project_dir: Path, available_scopes: list[str]) -> list[str]:
@@ -99,6 +97,8 @@ def _reset_stage2_artifacts(project_dir: Path) -> None:
     cleanup_files = [
         project_dir / "_processed_data" / "kanripo_fragments.jsonl",
         project_dir / "_processed_data" / "kanripo_screening_batches.jsonl",
+        project_dir / "2_stage_manifest.json",
+        resolve_stage2_manifest_path(project_dir),
         project_dir / "2_llm1_raw.jsonl",
         project_dir / "2_llm2_raw.jsonl",
         project_dir / ".cursor_llm1.json",

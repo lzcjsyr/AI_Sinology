@@ -37,3 +37,7 @@ def resolve_stage2_internal_path(project_dir: Path, filename: str) -> Path:
         return legacy_path
 
     return internal_path
+
+
+def resolve_stage2_manifest_path(project_dir: Path) -> Path:
+    return resolve_stage2_internal_path(project_dir, "2_stage_manifest.json")

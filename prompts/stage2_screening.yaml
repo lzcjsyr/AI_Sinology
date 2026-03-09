@@ -19,8 +19,7 @@ prompt:
           "theme_id": "T1",
           "is_relevant": true,
           "reason": "相关原因",
-          "target_span": "最短意群复述",
-          "related_spans": ["补充线索1", "补充线索2"]
+          "target_span": "最短定位短语"
         }
       ]
     }
@@ -28,9 +27,10 @@ prompt:
     1) 每个主题都必须返回一条 matches 记录。
     2) theme_id 必须严格使用输入里的 T1/T2/...，不得自造或改写。
     3) 不要返回 theme、主题名或其他额外字段。
-    4) 若 is_relevant=false，则 reason=null，target_span=null，related_spans=[]。
-    5) 若 is_relevant=true，则 reason 必须为非空字符串，target_span 必须为非空字符串，related_spans 必须为数组。
-    6) target_span 和 related_spans 应尽量贴近原文中的连续关键词，便于后续定位；不要输出整句照抄，也不要做过度意译。
+    4) 若 is_relevant=false，则 reason=null，target_span=null。
+    5) 若 is_relevant=true，则 reason 必须为非空字符串，target_span 必须为非空字符串。
+    6) target_span 必须是最短且足以回指原文位置的关键词或短语，尽量贴近原文连续关键词，便于后续定位；不要输出整句照抄，也不要做过度意译。
+    7) reason 需要同时承担原先补充线索的功能：先用极简短语概述核心事件，再补充判定理由或附加线索。
   user_template: |
     你是古籍史料筛选助手。请判断该批史料对各主题的相关性。
 

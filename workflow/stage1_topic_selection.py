@@ -12,7 +12,6 @@ from core.utils import (
     parse_json_from_text,
     parse_target_themes_from_proposal,
     read_text,
-    write_json,
     write_text,
 )
 
@@ -147,11 +146,12 @@ def _parse_section_content(response_content: str, section_title: str) -> str:
 def _compose_proposal(
     sections: list[str],
     *,
+    idea: str | None = None,
     target_themes: list[dict[str, str]] | None = None,
 ) -> str:
     blocks: list[str] = []
     if target_themes:
-        blocks.append(markdown_front_matter(target_themes))
+        blocks.append(markdown_front_matter(target_themes, idea=idea))
     if sections:
         blocks.append("\n\n".join(sections))
     if not blocks:
@@ -209,25 +209,6 @@ def _restore_completed_sections(
     return completed
 
 
-def _write_stage1_meta(
-    *,
-    meta_path: Path,
-    idea: str,
-    target_themes: list[dict[str, str]],
-    section_total: int,
-    completed_sections: int,
-) -> None:
-    write_json(
-        meta_path,
-        {
-            "idea": idea,
-            "target_themes": target_themes,
-            "section_total": section_total,
-            "completed_sections": completed_sections,
-        },
-    )
-
-
 def run_stage1_topic_selection(
     *,
     project_dir: Path,
@@ -238,7 +219,6 @@ def run_stage1_topic_selection(
     overwrite: bool = False,
 ) -> list[dict[str, str]]:
     output_path = project_dir / "1_research_proposal.md"
-    meta_path = project_dir / "1_research_proposal_meta.json"
     section_prompt_spec = load_prompt("stage1_section_writer")
     section_specs = _load_section_specs(section_prompt_spec)
     section_total = len(section_specs)
@@ -250,17 +230,12 @@ def run_stage1_topic_selection(
         sections = _restore_completed_sections(output_path, section_specs)
         existing_themes_raw = parse_target_themes_from_proposal(output_path)
         existing_themes = _coalesce_target_themes(existing_themes_raw, logger)
+        existing_text = read_text(output_path)
+        has_idea_front_matter = "idea:" in existing_text.split("---", 2)[1] if existing_text.startswith("---") else False
 
         if len(sections) == section_total and existing_themes:
-            if existing_themes != existing_themes_raw:
-                write_text(output_path, _compose_proposal(sections, target_themes=existing_themes))
-            _write_stage1_meta(
-                meta_path=meta_path,
-                idea=idea,
-                target_themes=existing_themes,
-                section_total=section_total,
-                completed_sections=len(sections),
-            )
+            if existing_themes != existing_themes_raw or (idea and not has_idea_front_matter):
+                write_text(output_path, _compose_proposal(sections, idea=idea, target_themes=existing_themes))
             logger.info("阶段一已存在，复用: %s", output_path)
             return existing_themes
 
@@ -309,13 +284,6 @@ def run_stage1_topic_selection(
         proposal=proposal,
         logger=logger,
     )
-    write_text(output_path, _compose_proposal(sections, target_themes=target_themes))
-    _write_stage1_meta(
-        meta_path=meta_path,
-        idea=idea,
-        target_themes=target_themes,
-        section_total=section_total,
-        completed_sections=len(sections),
-    )
+    write_text(output_path, _compose_proposal(sections, idea=idea, target_themes=target_themes))
     logger.info("阶段一完成: %s", output_path)
     return target_themes
