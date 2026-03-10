@@ -132,7 +132,7 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 
 > [!TIP]
 > **Token 开销与速度优化：** 粗筛与 `stage2_refinement` 精筛复核解耦后，第一轮只回答“是否相关”，第二轮只针对命中 batch 内的单个 piece 返回 `is_relevant / anchor_text / reason`。这避免了长 `evidence_groups` JSON 的解析负担，同时让每条正样本的证据归属天然落在当前 piece 上。
-> 若某个 batch 因 JSON 解析或结构校验失败而触发兜底，记录会显式带上 `judgment_status: screening_error` 与 `screening_error`，以免与真实的 `false` 判定混淆。
+> 若某个 `piece` 或 batch 在多次重试后仍失败，不再按“不相关”写入双侧原始结果，而是汇总到 `2_screening_failed_pieces.yaml`（内部镜像 `_internal/stage2/2_screening_failed_pieces.json`），并从自动仲裁链路中剔除，留待人工复核。
 
 ## 阶段 2.3：共识与争议分流 (Consensus & Dispute Shunting)
 
@@ -144,7 +144,15 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 
 ### [输出] 共识与争议分流档
 
-此环节由纯代码脚本对前两个 JSONL 文件进行精准比对生成，不涉及任何 LLM 逻辑。格式由 JSONL 转换为人类友好的 YAML，便于人工抽检或供后续第三方智能体仲裁。
+此环节由纯代码脚本对前两个 JSONL 文件进行精准比对生成，不涉及任何 LLM 逻辑。格式由 JSONL 转换为人类友好的 YAML，便于人工抽检或供后续第三方智能体仲裁。阶段二所有对外 YAML 统一采用精简包裹结构：
+
+```yaml
+piece_count: 12
+records:
+  - ...
+```
+
+其中 `piece_count` 统计的是当前文件内返回的唯一 `piece_id` 数量；`records` 只保留人工复核所需字段，不再暴露 `screening_batch_id` 与 `localization_*` 等内部定位元数据。
 
 - **文件名**：`2_consensus_data.yaml` (无分歧档案) 和 `2_disputed_data.yaml` (存在分歧的档案)
 
@@ -156,53 +164,34 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 - **彻底无关**：基于同一个 `piece_id` 和特定的 `theme`，若双侧模型的记录中 **`is_relevant` 均为 `false`**，即视该史料片段在该主题下无价值，直接丢弃（不写入任何档案）。若该片段针对所有目标主题的双侧判定均为 `false`，则该史料片段被彻底抛弃。
 
 ```yaml
-- piece_id: "pb:KR1a0001_tls_001-1a"
-  source_file: "周易"
-  original_text: |
-    是日，商贾云集，市井繁华...
-  matched_theme: "商人形象"
-  is_relevant: true
-  reason: "明确描写了市井商人的聚集场景。"
-  localization_bundle_id: "batch_00000001::T1::pb:KR1a0001_tls_001-1a"
-  localization_scope: "single"
-  anchor_text: "商贾云集"
+piece_count: 1
+records:
+  - piece_id: "pb:KR1a0001_tls_001-1a"
+    source_file: "周易"
+    matched_theme: "商人形象"
+    reason: "明确描写了市井商人的聚集场景。"
+    original_text: |
+      是日，商贾云集，市井繁华...
 ```
 
 **存在分歧的档案 `2_disputed_data.yaml` 数据结构**：
 **判定争议（Dispute）的唯一标准（基于主题差集）**：针对同一段史料和特定的 `theme`，**只有一个模型判定其为相关（`is_relevant: true`），而另一个模型明确判定为不相关（`is_relevant: false`）**，才会需要仲裁。
 （例如：如果两者都在“祈雨”上达成共识，但在“商人形象”上只有一方认为相关，另一方返回了 false，那么共识池里写“祈雨”，争议池里仅仅针对“商人形象”单独启动一轮仲裁判定。）
-为保证第三个 LLM 能够充分比较前两者的判断差异，此文档的嵌套结构必须清楚展现争议双方。**注意：为极致节省 Token 并保持逻辑一致，阶段 2.2 设定了判定为不相关时可不输出理由。因此，此处的 `is_relevant: false` 和 `reason: null` 是完全忠实于上游 LLM 实际产生的判断记录，依靠真实的 `is_relevant` 字段驱动后续比对工作。**
+为保证第三个 LLM 能够充分比较前两者的判断差异，此文档会保留争议双方的最小判定信息。**注意：为极致节省 Token 并保持逻辑一致，阶段 2.2 设定了判定为不相关时可不输出理由。因此，此处的 `is_relevant: false` 且无 `reason`，是对上游 LLM 实际输出的忠实保留。**
 
 ```yaml
-- piece_id: "pb:KR1a0001_tls_001-2a"
-  source_file: "周易"
-  original_text: |
-    祈雨之时，一聚散游手无赖之徒...
-  matched_theme: "商人形象"       # 该主题只有一方认为相关
-  llm1_result: 
-    is_relevant: true
-    reason: "提到游手好闲聚众人员，也许暗含着市井人员的初步集结。"
-    localization_scope: "single"
-    anchor_text: "游手无赖之徒"
-  llm2_result:
-    is_relevant: false
-    reason: null                  # 忠实于 LLM2 在阶段 2.2 时输出的无理由不相关判定
-```
-
-```yaml
-- piece_id: "pb:KR1a0001_tls_001-2a"
-  source_file: "周易"
-  original_text: |
-    大旱，王乃使祈雨...
-  matched_theme: "祈雨"
-  llm1_result: 
-    is_relevant: true
-    reason: "包含明确的祈雨情况与求雨目的。"
-    localization_scope: "single"
-    anchor_text: "使祈雨"
-  llm2_result:
-    is_relevant: false
-    reason: null                  # 忠实于 LLM 输出的无理由不相关判定
+piece_count: 1
+records:
+  - piece_id: "pb:KR1a0001_tls_001-2a"
+    source_file: "周易"
+    matched_theme: "商人形象"
+    llm1_result:
+      is_relevant: true
+      reason: "提到游手好闲聚众人员，也许暗含着市井人员的初步集结。"
+    llm2_result:
+      is_relevant: false
+    original_text: |
+      祈雨之时，一聚散游手无赖之徒...
 ```
 
 ---
@@ -220,7 +209,15 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 
 由第三方大模型读取争议档案并做出最终独立判定。**无论最终判定为相关还是无关，均必须保留该条仲裁记录与明确理由**，便于人工复核与审计。
 
-- **格式要求**：必须剥离 2.3 阶段争议文件中的双模型嵌套对比结构，打平恢复为最扁平的标准结构，即与最初阶段 2.2 `raw.jsonl` 单条提取的字段要素**完全一致**（转为 YAML 展现）。其中 `is_relevant` 可为 `true` 或 `false`，但 `reason` 必须始终为非空字符串。
+- **格式要求**：仲裁 YAML 继续沿用 `piece_count + records` 包裹结构；单条记录剥离双模型嵌套后，只保留 `piece_id / source_file / matched_theme / is_relevant / reason / original_text` 这些人工复核需要的核心字段。
+
+---
+
+### [输出] 2_screening_failed_pieces.yaml (人工复核清单)
+
+用于承接阶段 2.2 中多次重试后仍无法完成结构化判定的片段。这些 `piece_id` 会被显式移出自动共识/争议/仲裁流程，避免被误当作“不相关”处理。
+
+- **格式要求**：继续采用 `piece_count + records` 包裹结构；单条记录至少保留 `piece_id / source_file / failed_models / failure_stages / failed_themes / failure_reasons / original_text`，供后续人工审核。
 
 ---
 
@@ -228,20 +225,18 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 
 **明确定义**：`2_final_corpus.yaml` 在逻辑上，由 `2_consensus_data.yaml`（无分歧共识档案）与 `2_llm3_verified.yaml` 中 **`is_relevant: true` 的仲裁通过档案** 合并而成，作为最后沉淀出的核心 RAG 底料；系统会同时将等价内容写入 `_internal/stage2/2_final_corpus.json`，仅供后续阶段程序内部读取。
 
-- **数据结构与契约**：使用 YAML 格式，保留多行文本 (`|` 语法)。由于 `2_llm3_verified.yaml` 已经被强制要求剥离嵌套争议，格式恢复为最初单源分析时的扁平结构，因此筛选并拼接后的核心史料总库格式要素与最初阶段**完全一致**。
+- **数据结构与契约**：使用 YAML 格式，保留多行文本 (`|` 语法)。对外 `2_final_corpus.yaml` 采用精简结构，仅保留人工阅读需要的核心字段；程序继续读取 `_internal/stage2/2_final_corpus.json` 中的完整镜像。
 
 ```yaml
-- piece_id: "pb:KR1a0001_tls_001-1a"
-  source_file: "周易"
-  original_text: |
-    是日，商贾云集，市井繁华...
-  matched_theme: "商人形象"
-  is_relevant: true
-  reason: |
-    明确描写了市井商人的聚集场景，能够佐证晚明城市经济的繁荣，符合商人形象的主题要求。
-  localization_bundle_id: "batch_00000001::T1::pb:KR1a0001_tls_001-1a"
-  localization_scope: "single"
-  anchor_text: "商贾云集"
+piece_count: 1
+records:
+  - piece_id: "pb:KR1a0001_tls_001-1a"
+    source_file: "周易"
+    matched_theme: "商人形象"
+    reason: |
+      明确描写了市井商人的聚集场景，能够佐证晚明城市经济的繁荣，符合商人形象的主题要求。
+    original_text: |
+      是日，商贾云集，市井繁华...
 ```
 
 ---

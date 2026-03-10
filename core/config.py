@@ -49,15 +49,15 @@ PIPELINE_LLM_CONFIG: dict[str, dict[str, Any]] = {
     },
     "stage2_llm1": {
         "provider": "volcengine",
-        "model": "doubao-seed-2-0-lite-260215",
-        "rpm": 30000,
-        "tpm": 5000000,
+        "model": "deepseek-v3-2-251201",
+        "rpm": 15000,
+        "tpm": 1500000,
     },
     "stage2_llm2": {
         "provider": "volcengine",
-        "model": "doubao-seed-2-0-lite-260215",
-        "rpm": 30000,
-        "tpm": 5000000,
+        "model": "deepseek-v3-2-251201",
+        "rpm": 15000,
+        "tpm": 1500000,
     },
     "stage2_llm3": {
         "provider": "volcengine",
@@ -101,7 +101,7 @@ STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     
     # ---------------- 容错与重试机制 ----------------
     # 单个片段在单次遇到 LLM 请求失败（网络错误、超时、JSON 解析失败等）时的最大重试次数
-    "fragment_max_attempts": 5,
+    "fragment_max_attempts": 3,
     # 阶段级最大空跑重试次数：如果整个阶段二跑完未产生有效结果集（2_final_corpus），
     # 系统允许自动扩增碎片池并重跑的最大次数
     "max_empty_retries": 2,
@@ -301,7 +301,6 @@ def _build_stage_endpoint(
 @dataclass(frozen=True)
 class AppConfig:
     root_dir: Path
-    data_dir: Path
     outputs_dir: Path
     kanripo_dir: Path
     request_timeout: int
@@ -459,7 +458,6 @@ class AppConfig:
 
         return cls(
             root_dir=root_dir,
-            data_dir=root_dir / "data",
             outputs_dir=root_dir / "outputs",
             kanripo_dir=(root_dir / "data" / "kanripo_repos"),
             request_timeout=int(pick("REQUEST_TIMEOUT", "180") or "180"),

@@ -22,6 +22,59 @@ def _pick_shared_field(a: dict[str, Any], b: dict[str, Any], key: str) -> Any:
     return a.get(key) or b.get(key)
 
 
+def _compact_set(target: dict[str, Any], key: str, value: Any) -> None:
+    if value in (None, "", [], {}):
+        return
+    target[key] = value
+
+
+def _human_dispute_side(side: dict[str, Any]) -> dict[str, Any]:
+    record = {"is_relevant": bool(side.get("is_relevant"))}
+    status = str(side.get("judgment_status") or "").strip()
+    if status and status not in {"relevant", "irrelevant"}:
+        record["status"] = status
+    _compact_set(record, "reason", side.get("reason"))
+    _compact_set(record, "screening_error", side.get("screening_error"))
+    return record
+
+
+def _human_stage2_record(record: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    _compact_set(output, "piece_id", record.get("piece_id"))
+    _compact_set(output, "source_file", record.get("source_file"))
+    _compact_set(output, "matched_theme", record.get("matched_theme"))
+
+    if kind == "disputed":
+        output["llm1_result"] = _human_dispute_side(record.get("llm1_result") or {})
+        output["llm2_result"] = _human_dispute_side(record.get("llm2_result") or {})
+    elif kind == "verified":
+        output["is_relevant"] = bool(record.get("is_relevant"))
+        _compact_set(output, "reason", record.get("reason"))
+    else:
+        _compact_set(output, "reason", record.get("reason"))
+
+    _compact_set(output, "original_text", record.get("original_text"))
+    return output
+
+
+def _stage2_piece_count(records: list[dict[str, Any]]) -> int:
+    return len(
+        {
+            piece_id
+            for piece_id in (str(record.get("piece_id") or "").strip() for record in records)
+            if piece_id
+        }
+    )
+
+
+def _write_stage2_yaml(path: Path, records: list[dict[str, Any]], *, kind: str) -> None:
+    payload = {
+        "piece_count": _stage2_piece_count(records),
+        "records": [_human_stage2_record(record, kind=kind) for record in records],
+    }
+    write_yaml(path, payload)
+
+
 def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     reason_a = str(a.get("reason") or "")
     reason_b = str(b.get("reason") or "")
@@ -312,8 +365,8 @@ async def run_archival_arbitration(
 
     consensus_yaml_path = project_dir / "2_consensus_data.yaml"
     disputed_yaml_path = project_dir / "2_disputed_data.yaml"
-    write_yaml(consensus_yaml_path, consensus)
-    write_yaml(disputed_yaml_path, disputes)
+    _write_stage2_yaml(consensus_yaml_path, consensus, kind="consensus")
+    _write_stage2_yaml(disputed_yaml_path, disputes, kind="disputed")
 
     write_json(stage2_internal_json_path(project_dir, "2_consensus_data.json"), consensus)
     write_json(stage2_internal_json_path(project_dir, "2_disputed_data.json"), disputes)
@@ -367,14 +420,14 @@ async def run_archival_arbitration(
     verified: list[dict[str, Any]] = [row for row in verified_results if row is not None]
 
     llm3_yaml_path = project_dir / "2_llm3_verified.yaml"
-    write_yaml(llm3_yaml_path, verified)
+    _write_stage2_yaml(llm3_yaml_path, verified, kind="verified")
     write_json(stage2_internal_json_path(project_dir, "2_llm3_verified.json"), verified)
 
     accepted_verified = [row for row in verified if row.get("is_relevant") is True]
     final_corpus = consensus + accepted_verified
 
     final_yaml_path = project_dir / "2_final_corpus.yaml"
-    write_yaml(final_yaml_path, final_corpus)
+    _write_stage2_yaml(final_yaml_path, final_corpus, kind="final")
     write_json(stage2_internal_json_path(project_dir, "2_final_corpus.json"), final_corpus)
 
     logger.info(

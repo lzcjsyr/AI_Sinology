@@ -117,6 +117,10 @@ python3 main.py --continue-project demo_ming_study
   - 仅对命中的 `piece_id + matched_theme` 落盘，避免为无关主题写入大规模负样本。
   - batch 粗筛命中后，会进入 `stage2_refinement` 精筛复核；每个 piece 会携带少量前后邻接上下文，但只允许判断当前正文。
   - 每条记录会附带 `screening_batch_id`、`localization_method`、`localization_bundle_id`、`reason`、`anchor_text` 等定位元数据；默认 `localization_method=piece_direct_with_neighbors`，定位范围是单 piece。
+- 多次重试后仍失败的 `piece_id` 不再按“不相关”兜底，而会写入 `2_screening_failed_pieces.yaml`，并从自动仲裁链路中剔除，留待人工审核。
+- 阶段二对外 YAML（`2_consensus_data.yaml`、`2_disputed_data.yaml`、`2_llm3_verified.yaml`、`2_final_corpus.yaml`）会自动做精简导出。
+  - 文件顶部包含 `piece_count` 统计。
+  - `records` 里只保留人工复核真正需要的字段，不再暴露 `screening_batch_id` 和各类 `localization_*` 遗留元数据。
 - 阶段二日志统一写入 `_internal/stage2/2_stage_manifest.json`（包含所选 scopes、状态、重试信息和 `screening_audit`）。
 - 阶段五采用逐段润色（默认按 `####` 小节切片），每完成一段立即回写 `5_final_manuscript.md`，并记录 `5_polish_progress.json` 以支持中断续跑。
 - 产物按项目隔离存放在 `outputs/<project_name>/`。

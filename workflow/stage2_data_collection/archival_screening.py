@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -19,7 +18,15 @@ from core.project_paths import (
     stage2_internal_path,
 )
 from core.prompt_loader import PromptSpec, build_messages, load_prompt
-from core.utils import append_jsonl, parse_json_from_text, read_json, read_jsonl, write_json, write_jsonl
+from core.utils import (
+    append_jsonl,
+    parse_json_from_text,
+    read_json,
+    read_jsonl,
+    write_json,
+    write_jsonl,
+    write_yaml,
+)
 from workflow.stage2_data_collection.rate_control import (
     AcquireReservation,
     DualRateLimiter,
@@ -32,6 +39,8 @@ _JSON_MODE_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 _JSON_MODE_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
 _JSON_MODE_WARNED_CACHE: set[tuple[str, str]] = set()
 _SCREENING_BATCHES_FILE = "kanripo_screening_batches.jsonl"
+_FAILED_SCREENING_PIECES_YAML = "2_screening_failed_pieces.yaml"
+_FAILED_SCREENING_PIECES_JSON = "2_screening_failed_pieces.json"
 _JSON_RETRY_REMINDER = (
     "上一轮输出未通过结构校验。请这次只返回一个合法 JSON 对象，"
     "禁止 markdown、解释、代码块或任何额外文本；"
@@ -113,6 +122,13 @@ class BatchScreeningResult:
     used_refine: bool = False
     failed: bool = False
     failed_fragments: int = 0
+    manual_review_records: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ModelScreeningRunResult:
+    stats: ScreeningStats
+    manual_review_records: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
@@ -127,6 +143,14 @@ def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
 
 def _screening_batches_path(project_dir: Path) -> Path:
     return project_dir / "_processed_data" / _SCREENING_BATCHES_FILE
+
+
+def _failed_screening_yaml_path(project_dir: Path) -> Path:
+    return project_dir / _FAILED_SCREENING_PIECES_YAML
+
+
+def _failed_screening_json_path(project_dir: Path) -> Path:
+    return stage2_internal_path(project_dir, _FAILED_SCREENING_PIECES_JSON)
 
 
 def _fragment_char_count(text: str) -> int:
@@ -758,6 +782,37 @@ def _split_batch_into_single_piece_batches(
     return sub_batches
 
 
+def _split_piece_status(batch_result: "BatchScreeningResult") -> str:
+    if batch_result.failed:
+        return "failed"
+    relevant_count = sum(1 for row in batch_result.records if row.get("is_relevant") is True)
+    if relevant_count > 0:
+        return "relevant"
+    return "irrelevant"
+
+
+def _log_split_piece_outcome(
+    *,
+    logger,
+    parent_batch_id: str,
+    sub_batch: dict[str, Any],
+    batch_result: "BatchScreeningResult",
+) -> None:
+    piece_id = str((sub_batch.get("piece_ids") or [""])[0] or "")
+    relevant_count = sum(1 for row in batch_result.records if row.get("is_relevant") is True)
+    failed_count = len(batch_result.manual_review_records)
+    logger.info(
+        "拆分 piece 处理完成。parent_batch_id=%s batch_id=%s piece_id=%s status=%s relevant_records=%s failed_records=%s total_records=%s",
+        parent_batch_id,
+        sub_batch.get("batch_id"),
+        piece_id,
+        _split_piece_status(batch_result),
+        relevant_count,
+        failed_count,
+        len(batch_result.records) + failed_count,
+    )
+
+
 async def _classify_fragment_strict(
     *,
     llm_client: OpenAICompatClient,
@@ -1014,37 +1069,133 @@ def _build_positive_record(
     }
 
 
-def _build_failed_records(
+def _build_manual_review_records(
     *,
     batch: dict[str, Any],
     fragment_map: dict[str, dict[str, str]],
     target_themes: list[dict[str, str]],
     error: Exception,
+    failure_stage: str,
+    model_tag: str,
 ) -> list[dict[str, Any]]:
     error_text = str(error).strip()
+    failed_themes = [
+        str(theme_item.get("theme") or "").strip()
+        for theme_item in target_themes
+        if str(theme_item.get("theme") or "").strip()
+    ]
     records: list[dict[str, Any]] = []
     for piece_id in batch["piece_ids"]:
         fragment = fragment_map.get(piece_id)
         if not fragment:
             continue
-        for theme_item in target_themes:
-            theme = str(theme_item.get("theme") or "").strip()
-            records.append(
-                {
-                    "piece_id": fragment["piece_id"],
-                    "source_file": fragment["source_file"],
-                    "original_text": fragment["original_text"],
-                    "matched_theme": theme,
-                    "is_relevant": False,
-                    "judgment_status": "screening_error",
-                    "reason": None,
-                    "screening_batch_id": batch["batch_id"],
-                    "screening_parent_batch_id": batch.get("parent_batch_id"),
-                    "localization_method": "screening_error",
-                    "screening_error": error_text,
-                }
-            )
+        records.append(
+            {
+                "piece_id": fragment["piece_id"],
+                "source_file": fragment["source_file"],
+                "original_text": fragment["original_text"],
+                "screening_batch_id": batch["batch_id"],
+                "screening_parent_batch_id": batch.get("parent_batch_id"),
+                "failed_themes": failed_themes,
+                "failure_stage": failure_stage,
+                "failed_model": model_tag,
+                "failure_reason": error_text,
+            }
+        )
     return records
+
+
+def _extract_existing_manual_review_records(
+    *,
+    raw_rows: list[dict[str, Any]],
+    model_tag: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in raw_rows:
+        if str(row.get("judgment_status") or "").strip() != "screening_error":
+            continue
+        piece_id = str(row.get("piece_id") or "").strip()
+        if not piece_id:
+            continue
+        record = grouped.setdefault(
+            piece_id,
+            {
+                "piece_id": piece_id,
+                "source_file": str(row.get("source_file") or ""),
+                "original_text": str(row.get("original_text") or ""),
+                "screening_batch_id": row.get("screening_batch_id"),
+                "screening_parent_batch_id": row.get("screening_parent_batch_id"),
+                "failed_themes": [],
+                "failure_stage": "legacy_screening_error",
+                "failed_model": model_tag,
+                "failure_reason": str(row.get("screening_error") or "历史 screening_error 迁移").strip(),
+            },
+        )
+        theme = str(row.get("matched_theme") or "").strip()
+        if theme and theme not in record["failed_themes"]:
+            record["failed_themes"].append(theme)
+    return list(grouped.values())
+
+
+def _merge_manual_review_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for record in records:
+        piece_id = str(record.get("piece_id") or "").strip()
+        if not piece_id:
+            continue
+        current = merged.setdefault(
+            piece_id,
+            {
+                "piece_id": piece_id,
+                "source_file": str(record.get("source_file") or ""),
+                "original_text": str(record.get("original_text") or ""),
+                "failed_models": [],
+                "failure_stages": [],
+                "failed_themes": [],
+                "failure_reasons": [],
+                "screening_batch_ids": [],
+                "screening_parent_batch_ids": [],
+            },
+        )
+
+        source_file = str(record.get("source_file") or "").strip()
+        if source_file and not current["source_file"]:
+            current["source_file"] = source_file
+        original_text = str(record.get("original_text") or "")
+        if original_text and not current["original_text"]:
+            current["original_text"] = original_text
+
+        for target_key, source_key in (
+            ("failed_models", "failed_model"),
+            ("failure_stages", "failure_stage"),
+            ("failure_reasons", "failure_reason"),
+            ("screening_batch_ids", "screening_batch_id"),
+            ("screening_parent_batch_ids", "screening_parent_batch_id"),
+        ):
+            value = str(record.get(source_key) or "").strip()
+            if value and value not in current[target_key]:
+                current[target_key].append(value)
+
+        for theme in record.get("failed_themes") or []:
+            theme_text = str(theme or "").strip()
+            if theme_text and theme_text not in current["failed_themes"]:
+                current["failed_themes"].append(theme_text)
+
+    return [merged[piece_id] for piece_id in sorted(merged)]
+
+
+def _write_manual_review_yaml(path: Path, records: list[dict[str, Any]]) -> None:
+    write_yaml(path, {"piece_count": len(records), "records": records})
+
+
+def _filter_failed_piece_ids_from_raw(path: Path, failed_piece_ids: set[str]) -> int:
+    rows = read_jsonl(path)
+    kept_rows = [
+        row for row in rows if str(row.get("piece_id") or "").strip() not in failed_piece_ids
+    ]
+    removed = len(rows) - len(kept_rows)
+    write_jsonl(path, kept_rows)
+    return removed
 
 
 async def _screen_batch_strict(
@@ -1095,29 +1246,64 @@ async def _screen_batch_strict(
         split_used_refine = False
         split_failed = False
         split_failed_fragments = 0
+        split_manual_review_records: list[dict[str, Any]] = []
+        parent_batch_id = str(batch.get("batch_id") or "")
         for sub_batch in _split_batch_into_single_piece_batches(batch, fragment_map=fragment_map):
-            sub_result = await _screen_batch_strict(
-                llm_client=llm_client,
-                model=model,
-                llm_endpoint=llm_endpoint,
-                prompt_spec=prompt_spec,
-                refine_prompt_spec=refine_prompt_spec,
-                batch=sub_batch,
-                target_themes=target_themes,
-                fragment_map=fragment_map,
-                logger=logger,
-                max_attempts=max_attempts,
-                retry_backoff_seconds=retry_backoff_seconds,
-                provider_limiter=provider_limiter,
-                sync_limiter=sync_limiter,
-                prefer_json_mode=prefer_json_mode,
-            )
+            try:
+                sub_result = await _screen_batch_strict(
+                    llm_client=llm_client,
+                    model=model,
+                    llm_endpoint=llm_endpoint,
+                    prompt_spec=prompt_spec,
+                    refine_prompt_spec=refine_prompt_spec,
+                    batch=sub_batch,
+                    target_themes=target_themes,
+                    fragment_map=fragment_map,
+                    logger=logger,
+                    max_attempts=max_attempts,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    provider_limiter=provider_limiter,
+                    sync_limiter=sync_limiter,
+                    prefer_json_mode=prefer_json_mode,
+                )
+            except Exception as sub_error:
+                piece_id = str((sub_batch.get("piece_ids") or [""])[0] or "")
+                logger.error(
+                    "拆分后 piece 筛选最终失败，已移入人工审核。parent_batch_id=%s batch_id=%s piece_id=%s error=%s",
+                    parent_batch_id,
+                    sub_batch.get("batch_id"),
+                    piece_id,
+                    sub_error,
+                )
+                sub_result = BatchScreeningResult(
+                    records=[],
+                    manual_review_records=_build_manual_review_records(
+                        batch=sub_batch,
+                        fragment_map=fragment_map,
+                        target_themes=target_themes,
+                        error=sub_error,
+                        failure_stage="split_piece_screening",
+                        model_tag=llm_endpoint.stage,
+                    ),
+                    usage=None,
+                    control_stats=RequestControlStats(),
+                    used_refine=False,
+                    failed=True,
+                    failed_fragments=len(sub_batch["piece_ids"]),
+                )
             split_records.extend(sub_result.records)
             split_usage = _merge_usage(split_usage, sub_result.usage)
             split_stats.absorb(sub_result.control_stats)
             split_used_refine = split_used_refine or sub_result.used_refine
             split_failed = split_failed or sub_result.failed
             split_failed_fragments += int(sub_result.failed_fragments or 0)
+            split_manual_review_records.extend(sub_result.manual_review_records)
+            _log_split_piece_outcome(
+                logger=logger,
+                parent_batch_id=parent_batch_id,
+                sub_batch=sub_batch,
+                batch_result=sub_result,
+            )
         return BatchScreeningResult(
             records=split_records,
             usage=split_usage,
@@ -1125,6 +1311,7 @@ async def _screen_batch_strict(
             used_refine=split_used_refine,
             failed=split_failed,
             failed_fragments=split_failed_fragments,
+            manual_review_records=split_manual_review_records,
         )
 
     relevant_matches = [match for match in matches if bool(match.get("is_relevant"))]
@@ -1140,6 +1327,7 @@ async def _screen_batch_strict(
     piece_usage: dict[str, Any] | None = None
     piece_stats = RequestControlStats()
     failed_piece_count = 0
+    manual_review_records: list[dict[str, Any]] = []
     piece_inputs = _build_piece_inputs(batch, fragment_map=fragment_map)
     if not piece_inputs:
         raise RuntimeError(f"批次缺少可分析 piece：batch_id={batch['batch_id']}")
@@ -1170,19 +1358,21 @@ async def _screen_batch_strict(
         except Exception as piece_error:
             failed_piece_count += 1
             logger.error(
-                "piece 分析最终失败，按当前 piece 不相关兜底继续。batch_id=%s piece_id=%s error=%s",
+                "piece 分析最终失败，已移入人工审核。batch_id=%s piece_id=%s error=%s",
                 batch.get("batch_id"),
                 piece_id,
                 piece_error,
             )
             failed_piece_batch = dict(batch)
             failed_piece_batch["piece_ids"] = [piece_id]
-            records.extend(
-                _build_failed_records(
+            manual_review_records.extend(
+                _build_manual_review_records(
                     batch=failed_piece_batch,
                     fragment_map=fragment_map,
                     target_themes=[{"theme": match["theme"]} for match in relevant_matches],
                     error=piece_error,
+                    failure_stage="piece_refinement",
+                    model_tag=llm_endpoint.stage,
                 )
             )
             continue
@@ -1219,6 +1409,7 @@ async def _screen_batch_strict(
         used_refine=True,
         failed=failed_piece_count > 0,
         failed_fragments=failed_piece_count,
+        manual_review_records=manual_review_records,
     )
 
 
@@ -1244,7 +1435,7 @@ async def _run_single_model(
     progress_callback: Callable[[str, int, float | None, bool], None] | None = None,
     json_mode_enabled: bool = True,
     fragment_failure_fallback: bool = True,
-) -> ScreeningStats:
+) -> ModelScreeningRunResult:
     model = llm_endpoint.model
 
     next_index = 0
@@ -1260,26 +1451,28 @@ async def _run_single_model(
         if sync_gate is not None:
             await sync_gate.set_processed(tag, total)
         logger.info("%s 无需继续，已完成。", tag)
-        return ScreeningStats(
-            model_tag=tag,
-            model_name=model,
-            provider=llm_endpoint.provider,
-            start_index=next_index,
-            end_index=next_index,
-            processed_batches=0,
-            processed_fragments=0,
-            raw_records_written=0,
-            refined_batches=0,
-            total_tokens=0,
-            prompt_tokens=0,
-            completion_tokens=0,
-            provider_wait_seconds=0.0,
-            sync_wait_seconds=0.0,
-            provider_throttled_count=0,
-            sync_throttled_count=0,
-            retry_count=0,
-            failed_batches=0,
-            failed_fragments=0,
+        return ModelScreeningRunResult(
+            stats=ScreeningStats(
+                model_tag=tag,
+                model_name=model,
+                provider=llm_endpoint.provider,
+                start_index=next_index,
+                end_index=next_index,
+                processed_batches=0,
+                processed_fragments=0,
+                raw_records_written=0,
+                refined_batches=0,
+                total_tokens=0,
+                prompt_tokens=0,
+                completion_tokens=0,
+                provider_wait_seconds=0.0,
+                sync_wait_seconds=0.0,
+                provider_throttled_count=0,
+                sync_throttled_count=0,
+                retry_count=0,
+                failed_batches=0,
+                failed_fragments=0,
+            ),
         )
 
     existing_flat_rows = read_jsonl(raw_output_path)
@@ -1349,6 +1542,8 @@ async def _run_single_model(
         failed_batches=0,
         failed_fragments=0,
     )
+    manual_review_records: list[dict[str, Any]] = []
+    seen_manual_review_piece_ids: set[str] = set()
 
     progress_step = max(1, total // 200)
     next_progress_checkpoint = min(total, (((next_index // progress_step) + 1) * progress_step))
@@ -1425,18 +1620,21 @@ async def _run_single_model(
                             pending_task.cancel()
                         raise
                     logger.error(
-                        "批次筛选最终失败，按不相关兜底继续。tag=%s model=%s batch_id=%s error=%s",
+                        "批次筛选最终失败，已移入人工审核。tag=%s model=%s batch_id=%s error=%s",
                         tag,
                         model,
                         batch.get("batch_id"),
                         e,
                     )
                     batch_result = BatchScreeningResult(
-                        records=_build_failed_records(
+                        records=[],
+                        manual_review_records=_build_manual_review_records(
                             batch=batch,
                             fragment_map=fragment_map,
                             target_themes=target_themes,
                             error=e,
+                            failure_stage="batch_screening",
+                            model_tag=tag,
                         ),
                         usage=None,
                         control_stats=RequestControlStats(),
@@ -1460,6 +1658,12 @@ async def _run_single_model(
                     append_jsonl(raw_output_path, record)
                     seen_flat.add(key)
                     stats.raw_records_written += 1
+                for review_record in batch_result.manual_review_records:
+                    piece_id = str(review_record.get("piece_id") or "").strip()
+                    if not piece_id or piece_id in seen_manual_review_piece_ids:
+                        continue
+                    manual_review_records.append(review_record)
+                    seen_manual_review_piece_ids.add(piece_id)
 
                 prompt, completion, total_token = _usage_tokens(batch_result.usage)
                 stats.prompt_tokens += prompt
@@ -1504,7 +1708,10 @@ async def _run_single_model(
             if not task.done():
                 task.cancel()
 
-    return stats
+    return ModelScreeningRunResult(
+        stats=stats,
+        manual_review_records=manual_review_records,
+    )
 
 
 async def run_archival_screening(
@@ -1521,7 +1728,7 @@ async def run_archival_screening(
     sync_headroom: float = 0.85,
     sync_max_ahead: int = 128,
     sync_mode: str = "lowest_shared",
-    fragment_max_attempts: int = 5,
+    fragment_max_attempts: int = 3,
     retry_backoff_seconds: float = 2.0,
     screening_batch_max_chars: int = 300,
 ) -> tuple[Path, Path, dict[str, Any]]:
@@ -1650,8 +1857,22 @@ async def run_archival_screening(
         ),
     )
 
+    existing_manual_review_records = []
+    existing_manual_review_records.extend(
+        _extract_existing_manual_review_records(
+            raw_rows=read_jsonl(llm1_raw_path),
+            model_tag="llm1",
+        )
+    )
+    existing_manual_review_records.extend(
+        _extract_existing_manual_review_records(
+            raw_rows=read_jsonl(llm2_raw_path),
+            model_tag="llm2",
+        )
+    )
+
     try:
-        stats1, stats2 = await asyncio.gather(
+        run_result1, run_result2 = await asyncio.gather(
             _run_single_model(
                 tag="llm1",
                 llm_endpoint=llm1_endpoint,
@@ -1699,6 +1920,35 @@ async def run_archival_screening(
         )
     finally:
         progress.finalize()
+    stats1 = run_result1.stats
+    stats2 = run_result2.stats
+
+    manual_review_records = _merge_manual_review_records(
+        existing_manual_review_records
+        + run_result1.manual_review_records
+        + run_result2.manual_review_records
+    )
+    failed_piece_ids = {
+        str(record.get("piece_id") or "").strip()
+        for record in manual_review_records
+        if str(record.get("piece_id") or "").strip()
+    }
+    removed_llm1 = _filter_failed_piece_ids_from_raw(llm1_raw_path, failed_piece_ids)
+    removed_llm2 = _filter_failed_piece_ids_from_raw(llm2_raw_path, failed_piece_ids)
+
+    failed_yaml_path = _failed_screening_yaml_path(project_dir)
+    failed_json_path = _failed_screening_json_path(project_dir)
+    _write_manual_review_yaml(failed_yaml_path, manual_review_records)
+    write_json(failed_json_path, manual_review_records)
+
+    if failed_piece_ids:
+        logger.warning(
+            "阶段2.2发现 %s 个需人工审核的失败 piece，已写入 %s，并从原始筛选结果中剔除相关记录(llm1=%s, llm2=%s)。",
+            len(failed_piece_ids),
+            failed_yaml_path,
+            removed_llm1,
+            removed_llm2,
+        )
 
     stats_payload = {
         "total_fragments": len(fragments),
@@ -1718,6 +1968,15 @@ async def run_archival_screening(
             "llm1": llm1_concurrency,
             "llm2": llm2_concurrency,
             "estimated_tokens_per_request": estimated_tokens_per_request,
+        },
+        "manual_review": {
+            "piece_count": len(manual_review_records),
+            "yaml_path": str(failed_yaml_path),
+            "json_path": str(failed_json_path),
+            "excluded_raw_records": {
+                "llm1": removed_llm1,
+                "llm2": removed_llm2,
+            },
         },
     }
 

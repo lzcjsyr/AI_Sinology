@@ -117,6 +117,9 @@ def _reset_stage2_artifacts(project_dir: Path) -> None:
         project_dir / "2_final_corpus.yaml",
         project_dir / "2_final_corpus.json",
         resolve_stage2_json_path(project_dir, "2_final_corpus.json"),
+        project_dir / "2_screening_failed_pieces.yaml",
+        project_dir / "2_screening_failed_pieces.json",
+        resolve_stage2_json_path(project_dir, "2_screening_failed_pieces.json"),
         project_dir / "2_stage_failure_report.md",
     ]
     for file_path in dict.fromkeys(cleanup_files):
@@ -194,6 +197,14 @@ def _write_failure_report(
     unique_piece_1 = len({row.get("piece_id") for row in llm1_rows if row.get("piece_id")})
     unique_piece_2 = len({row.get("piece_id") for row in llm2_rows if row.get("piece_id")})
 
+    manual_review = screening_audit.get("manual_review") if isinstance(screening_audit, dict) else None
+    manual_review_text = ""
+    if isinstance(manual_review, dict):
+        manual_review_text = (
+            f"- manual_review: piece_count={manual_review.get('piece_count')} "
+            f"path={manual_review.get('yaml_path')}"
+        )
+
     audit_text = f"- screening_audit: {screening_audit}\n" if screening_audit else ""
 
     report = "\n".join(
@@ -210,6 +221,7 @@ def _write_failure_report(
             f"- 最终 max_fragments: {max_fragments}",
             f"- llm1 原始记录数: {len(llm1_rows)} | is_relevant=true: {llm1_true} | unique_piece: {unique_piece_1}",
             f"- llm2 原始记录数: {len(llm2_rows)} | is_relevant=true: {llm2_true} | unique_piece: {unique_piece_2}",
+            manual_review_text,
             audit_text.strip(),
             "",
             "## 建议动作",
@@ -411,7 +423,7 @@ def run_stage2_data_collection(
     sync_headroom: float = 0.85,
     sync_max_ahead: int = 128,
     sync_mode: str = "lowest_shared",
-    fragment_max_attempts: int = 5,
+    fragment_max_attempts: int = 3,
     retry_backoff_seconds: float = 2.0,
     screening_batch_max_chars: int = 300,
 ) -> list[dict[str, Any]]:

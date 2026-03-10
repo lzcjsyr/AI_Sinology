@@ -102,7 +102,6 @@ class ProjectState:
     project_name: str
     project_dir: Path
     next_stage: int
-    current_stage_name: str
 
 
 @dataclass(frozen=True)
@@ -148,14 +147,7 @@ class StateManager:
             project_name=safe_name,
             project_dir=project_dir,
             next_stage=1,
-            current_stage_name=STAGE_NAMES[1],
         )
-
-    def get_project(self, project_name: str) -> ProjectState:
-        project_dir = self.outputs_dir / project_name
-        if not project_dir.exists() or not project_dir.is_dir():
-            raise FileNotFoundError(f"项目不存在: {project_name}")
-        return self.infer_state(project_name)
 
     @staticmethod
     def _exists_any(project_dir: Path, relative_paths: list[str]) -> bool:
@@ -259,7 +251,6 @@ class StateManager:
             project_name=project_name,
             project_dir=project_dir,
             next_stage=next_stage,
-            current_stage_name=STAGE_NAMES[next_stage],
         )
 
     @staticmethod
