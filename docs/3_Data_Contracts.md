@@ -106,7 +106,7 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 ```
 
 **2. 落盘文件 (`2_llm1_raw.jsonl` 和 `2_llm2_raw.jsonl`) 的完整单行 Schema**：
-调度的纯 Python 脚本（`archival_screening.py`）在接收到粗筛数组后，会把命中 batch 直接拆成多个 piece，再对每个 piece 发起二次分析。该次分析会额外提供前后相邻 piece 的少量上下文，但模型只允许判断当前正文，并且 `anchor_text` 只能来自当前 piece。
+调度的纯 Python 脚本（`archival_screening.py`）在接收到粗筛数组后，会把命中 batch 直接拆成多个 piece，再通过 `stage2_refinement` 对每个 piece 发起精筛复核。该次分析会额外提供前后相邻 piece 的少量上下文，但模型只允许判断当前正文，并且 `anchor_text` 只能来自当前 piece。
 脚本最终仍以 `(piece_id, matched_theme)` 为最小落盘单位；为兼容下游仲裁与审计，仍保留定位元数据，但默认都对应单 piece：
 
 ```json
@@ -131,7 +131,7 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 ```
 
 > [!TIP]
-> **Token 开销与速度优化：** 粗筛与逐 piece 分析解耦后，第一轮只回答“是否相关”，第二轮只针对命中 batch 内的单个 piece 返回 `is_relevant / anchor_text / reason`。这避免了长 `evidence_groups` JSON 的解析负担，同时让每条正样本的证据归属天然落在当前 piece 上。
+> **Token 开销与速度优化：** 粗筛与 `stage2_refinement` 精筛复核解耦后，第一轮只回答“是否相关”，第二轮只针对命中 batch 内的单个 piece 返回 `is_relevant / anchor_text / reason`。这避免了长 `evidence_groups` JSON 的解析负担，同时让每条正样本的证据归属天然落在当前 piece 上。
 > 若某个 batch 因 JSON 解析或结构校验失败而触发兜底，记录会显式带上 `judgment_status: screening_error` 与 `screening_error`，以免与真实的 `false` 判定混淆。
 
 ## 阶段 2.3：共识与争议分流 (Consensus & Dispute Shunting)

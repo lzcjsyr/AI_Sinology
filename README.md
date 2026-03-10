@@ -85,6 +85,7 @@ python3 main.py --continue-project demo_ming_study
   - `metadata.purpose`：步骤用途说明
   - `variables`：本步骤需要的输入变量说明
   - `prompt.system` / `prompt.user_template`：系统提示词与用户模板（变量缺失会直接报错终止）
+  - 阶段二当前拆分为 `stage2_screening`、`stage2_refinement`、`stage2_arbitration` 三个 prompt 步骤
 - 阶段二可独立配置三套模型（`stage2_llm1/2/3`），并在同一处配置该模型的 `rpm/tpm`（见 `core/config.py` 的 `PIPELINE_LLM_CONFIG`）。
 - 阶段二并发支持手工覆盖，也支持自动推导（推荐自动）：
   - `STAGE2_LLM1_CONCURRENCY` / `--stage2-llm1-concurrency`
@@ -114,7 +115,7 @@ python3 main.py --continue-project demo_ming_study
 - 阶段二支持断点续传：`_internal/stage2/.cursor_llm1.json` 与 `_internal/stage2/.cursor_llm2.json` 会按 batch 级索引恢复进度。
 - `2_llm1_raw.jsonl` / `2_llm2_raw.jsonl` 是最终的片段级命中结果。
   - 仅对命中的 `piece_id + matched_theme` 落盘，避免为无关主题写入大规模负样本。
-  - batch 粗筛命中后，会改为逐 piece 分析；每个 piece 会携带少量前后邻接上下文，但只允许判断当前正文。
+  - batch 粗筛命中后，会进入 `stage2_refinement` 精筛复核；每个 piece 会携带少量前后邻接上下文，但只允许判断当前正文。
   - 每条记录会附带 `screening_batch_id`、`localization_method`、`localization_bundle_id`、`reason`、`anchor_text` 等定位元数据；默认 `localization_method=piece_direct_with_neighbors`，定位范围是单 piece。
 - 阶段二日志统一写入 `_internal/stage2/2_stage_manifest.json`（包含所选 scopes、状态、重试信息和 `screening_audit`）。
 - 阶段五采用逐段润色（默认按 `####` 小节切片），每完成一段立即回写 `5_final_manuscript.md`，并记录 `5_polish_progress.json` 以支持中断续跑。

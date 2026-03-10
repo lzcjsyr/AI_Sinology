@@ -1,6 +1,6 @@
 metadata:
-  step: stage2_localization
-  purpose: 对粗筛命中的批次按 piece 直接分析。
+  step: stage2_refinement
+  purpose: 对粗筛命中的批次按 piece 做精筛复核。
 
 variables:
   unresolved_themes_block: 待分析主题列表。

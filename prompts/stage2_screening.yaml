@@ -4,8 +4,7 @@ metadata:
 
 variables:
   themes_block: 主题列表文本（含 T1/T2/... 编号）。
-  batch_id: 粗筛批次唯一标识。
-  source_file: 来源文件名。
+  source_file: 当前批次所属古籍标题或文献来源，来自原文元数据，不是文件路径。
   batch_text: 合并后的史料正文。
 
 prompt:
@@ -35,7 +34,8 @@ prompt:
     目标主题：
     ${themes_block}
 
-    粗筛批次 batch_id=${batch_id}
-    source_file=${source_file}
+    书名与文献来源（当前批次所属古籍标题）=
+    ${source_file}
+
     batch_text=
     ${batch_text}

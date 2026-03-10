@@ -531,7 +531,6 @@ def _estimate_screening_request_tokens(
         messages = build_messages(
             prompt_spec,
             themes_block=themes_block,
-            batch_id=batch["batch_id"],
             source_file=batch["source_file"],
             batch_text=batch["batch_text"],
         )
@@ -781,7 +780,6 @@ async def _classify_fragment_strict(
     messages = build_messages(
         prompt_spec,
         themes_block=themes_block,
-        batch_id=batch_id,
         source_file=fragment["source_file"],
         batch_text=batch_text,
     )
@@ -1529,7 +1527,7 @@ async def run_archival_screening(
 ) -> tuple[Path, Path, dict[str, Any]]:
     _theme_names(target_themes)
     prompt_spec = load_prompt("stage2_screening")
-    refine_prompt_spec = load_prompt("stage2_localization")
+    refine_prompt_spec = load_prompt("stage2_refinement")
     internal_dir = stage2_internal_dir(project_dir)
     internal_dir.mkdir(parents=True, exist_ok=True)
 
