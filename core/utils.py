@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+_JSON_TAG_RE = re.compile(r"<json>\s*(.*?)\s*</json>", re.IGNORECASE | re.DOTALL)
+_TRAILING_COMMA_RE = re.compile(r",(?=\s*[}\]])")
+_SMART_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‟": '"',
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "‛": "'",
+    }
+)
 
 
 def ensure_dir(path: Path) -> None:
@@ -111,14 +129,141 @@ def _strip_outer_code_fence(text: str) -> str:
     return stripped
 
 
-def _extract_first_json_value(text: str) -> Any:
-    candidates = [text.strip(), _strip_outer_code_fence(text)]
+def _normalize_json_candidate(text: str) -> str:
+    return text.strip().lstrip("\ufeff").translate(_SMART_QUOTE_TRANSLATION)
+
+
+def _extract_tagged_json_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for pattern in (_JSON_FENCE_RE, _JSON_TAG_RE):
+        for match in pattern.finditer(text):
+            candidate = _normalize_json_candidate(match.group(1))
+            if candidate:
+                candidates.append(candidate)
+    return candidates
+
+
+def _iter_balanced_json_snippets(text: str) -> list[str]:
+    snippets: list[str] = []
+    length = len(text)
+    for start, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        stack = [ch]
+        in_string = False
+        string_quote = ""
+        escaped = False
+        for idx in range(start + 1, length):
+            current = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if current == "\\":
+                    escaped = True
+                    continue
+                if current == string_quote:
+                    in_string = False
+                continue
+
+            if current in {'"', "'"}:
+                in_string = True
+                string_quote = current
+                continue
+
+            if current in "{[":
+                stack.append(current)
+                continue
+            if current in "}]":
+                if not stack:
+                    break
+                opening = stack[-1]
+                if (opening, current) not in {("{", "}"), ("[", "]")}:
+                    break
+                stack.pop()
+                if not stack:
+                    snippet = _normalize_json_candidate(text[start : idx + 1])
+                    if snippet:
+                        snippets.append(snippet)
+                    break
+    return snippets
+
+
+def _replace_json_literals_outside_strings(text: str) -> str:
+    replacements = {"true": "True", "false": "False", "null": "None"}
+    result: list[str] = []
+    idx = 0
+    length = len(text)
+    in_string = False
+    string_quote = ""
+    escaped = False
+
+    while idx < length:
+        ch = text[idx]
+        if in_string:
+            result.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == string_quote:
+                in_string = False
+            idx += 1
+            continue
+
+        if ch in {'"', "'"}:
+            in_string = True
+            string_quote = ch
+            result.append(ch)
+            idx += 1
+            continue
+
+        matched = False
+        for source, target in replacements.items():
+            end = idx + len(source)
+            if not text.startswith(source, idx):
+                continue
+            prev = text[idx - 1] if idx > 0 else ""
+            next_char = text[end] if end < length else ""
+            if (prev.isalnum() or prev == "_") or (next_char.isalnum() or next_char == "_"):
+                continue
+            result.append(target)
+            idx = end
+            matched = True
+            break
+        if matched:
+            continue
+
+        result.append(ch)
+        idx += 1
+
+    return "".join(result)
+
+
+def _repair_json_candidate(text: str) -> str:
+    repaired = _normalize_json_candidate(text)
+    repaired = _TRAILING_COMMA_RE.sub("", repaired)
+    return repaired
+
+
+def _try_parse_python_like_value(text: str) -> Any:
+    normalized = _replace_json_literals_outside_strings(text)
+    value = ast.literal_eval(normalized)
+    if isinstance(value, (dict, list)):
+        return value
+    raise ValueError("Python 风格结构的根节点不是对象或数组")
+
+
+def _try_decode_candidate(text: str, *, allow_python_like: bool) -> Any:
     decoder = json.JSONDecoder()
+    candidates = [_normalize_json_candidate(text)]
+    repaired = _repair_json_candidate(text)
+    if repaired not in candidates:
+        candidates.append(repaired)
 
     for candidate in candidates:
         if not candidate:
             continue
-
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
@@ -133,6 +278,42 @@ def _extract_first_json_value(text: str) -> Any:
             except json.JSONDecodeError:
                 continue
 
+        if allow_python_like:
+            try:
+                return _try_parse_python_like_value(candidate)
+            except Exception:  # noqa: BLE001
+                pass
+
+    raise ValueError("模型返回中未找到可解析的 JSON 结构")
+
+
+def _extract_first_json_value(text: str) -> Any:
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for candidate in [
+        _normalize_json_candidate(text),
+        _normalize_json_candidate(_strip_outer_code_fence(text)),
+        *_extract_tagged_json_candidates(text),
+    ]:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    for candidate in list(candidates):
+        for snippet in _iter_balanced_json_snippets(candidate):
+            if snippet and snippet not in seen:
+                seen.add(snippet)
+                candidates.append(snippet)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return _try_decode_candidate(candidate, allow_python_like=True)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    if last_error is not None:
+        raise ValueError("模型返回中未找到可解析的 JSON 结构") from last_error
     raise ValueError("模型返回中未找到可解析的 JSON 结构")
 
 

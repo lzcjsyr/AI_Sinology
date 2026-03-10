@@ -33,6 +33,7 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         "original_text": _pick_shared_field(a, b, "original_text"),
         "matched_theme": a["matched_theme"],
         "is_relevant": True,
+        "judgment_status": "relevant",
         "reason": chosen_reason or "双模型一致判定相关",
         "screening_batch_id": _pick_shared_field(a, b, "screening_batch_id"),
         "localization_method": _pick_shared_field(a, b, "localization_method"),
@@ -43,6 +44,40 @@ def _consensus_record(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         "all_localized_piece_ids": _pick_shared_field(a, b, "all_localized_piece_ids"),
         "localization_scope": _pick_shared_field(a, b, "localization_scope"),
         "anchor_text": _pick_shared_field(a, b, "anchor_text"),
+    }
+
+
+def _flatten_arbitration_record(
+    dispute: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    llm1_result = dispute.get("llm1_result") or {}
+    llm2_result = dispute.get("llm2_result") or {}
+    return {
+        "piece_id": dispute["piece_id"],
+        "source_file": dispute.get("source_file"),
+        "original_text": dispute.get("original_text"),
+        "matched_theme": dispute["matched_theme"],
+        "is_relevant": bool(decision.get("is_relevant")),
+        "judgment_status": "relevant" if bool(decision.get("is_relevant")) else "irrelevant",
+        "reason": str(decision.get("reason") or "").strip(),
+        "screening_batch_id": llm1_result.get("screening_batch_id")
+        or llm2_result.get("screening_batch_id"),
+        "localization_method": llm1_result.get("localization_method")
+        or llm2_result.get("localization_method"),
+        "localization_bundle_id": llm1_result.get("localization_bundle_id")
+        or llm2_result.get("localization_bundle_id"),
+        "localization_group_index": llm1_result.get("localization_group_index")
+        or llm2_result.get("localization_group_index"),
+        "localization_group_count": llm1_result.get("localization_group_count")
+        or llm2_result.get("localization_group_count"),
+        "localization_group_piece_ids": llm1_result.get("localization_group_piece_ids")
+        or llm2_result.get("localization_group_piece_ids"),
+        "all_localized_piece_ids": llm1_result.get("all_localized_piece_ids")
+        or llm2_result.get("all_localized_piece_ids"),
+        "localization_scope": llm1_result.get("localization_scope")
+        or llm2_result.get("localization_scope"),
+        "anchor_text": llm1_result.get("anchor_text") or llm2_result.get("anchor_text"),
     }
 
 
@@ -63,9 +98,11 @@ def _dispute_side(record: dict[str, Any] | None) -> dict[str, Any]:
     if record is None:
         return {
             "is_relevant": False,
+            "judgment_status": "missing",
             "reason": None,
             "localization_method": None,
             "screening_batch_id": None,
+            "screening_error": None,
             "localization_bundle_id": None,
             "localization_group_index": None,
             "localization_group_count": None,
@@ -76,9 +113,11 @@ def _dispute_side(record: dict[str, Any] | None) -> dict[str, Any]:
         }
     return {
         "is_relevant": bool(record.get("is_relevant")),
+        "judgment_status": str(record.get("judgment_status") or ("relevant" if record.get("is_relevant") else "irrelevant")),
         "reason": record.get("reason") if record.get("is_relevant") else None,
         "localization_method": record.get("localization_method"),
         "screening_batch_id": record.get("screening_batch_id"),
+        "screening_error": record.get("screening_error"),
         "localization_bundle_id": record.get("localization_bundle_id"),
         "localization_group_index": record.get("localization_group_index"),
         "localization_group_count": record.get("localization_group_count"),
@@ -195,7 +234,7 @@ async def _arbitrate_single_dispute(
     logger,
     rate_limiter: DualRateLimiter | None,
     retry_backoff_seconds: float,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
 ) -> dict[str, Any]:
     model = llm_endpoint.model
     messages = build_messages(
@@ -226,13 +265,10 @@ async def _arbitrate_single_dispute(
             if not isinstance(data.get("is_relevant"), bool):
                 raise ValueError("is_relevant 不是布尔值")
             is_relevant = bool(data.get("is_relevant"))
-            if not is_relevant:
-                return {"is_relevant": False, "reason": None}
-
             reason = str(data.get("reason") or "").strip()
             if not reason:
-                raise ValueError("相关仲裁缺少 reason")
-            return {"is_relevant": True, "reason": reason}
+                raise ValueError("仲裁结果缺少 reason")
+            return {"is_relevant": is_relevant, "reason": reason}
         except Exception as e:  # noqa: BLE001
             last_error = e
             logger.warning(
@@ -324,57 +360,29 @@ async def run_archival_arbitration(
                 rate_limiter=limiter,
                 retry_backoff_seconds=retry_backoff_seconds,
             )
-            if not result["is_relevant"]:
-                return
-            verified_results[i] = {
-                "piece_id": dispute["piece_id"],
-                "source_file": dispute.get("source_file"),
-                "original_text": dispute.get("original_text"),
-                "matched_theme": dispute["matched_theme"],
-                "is_relevant": True,
-                "reason": result.get("reason") or "仲裁判定相关",
-                "screening_batch_id": dispute["llm1_result"].get("screening_batch_id")
-                or dispute["llm2_result"].get("screening_batch_id"),
-                "localization_method": dispute["llm1_result"].get("localization_method")
-                or dispute["llm2_result"].get("localization_method"),
-                "localization_bundle_id": dispute["llm1_result"].get("localization_bundle_id")
-                or dispute["llm2_result"].get("localization_bundle_id"),
-                "localization_group_index": dispute["llm1_result"].get("localization_group_index")
-                or dispute["llm2_result"].get("localization_group_index"),
-                "localization_group_count": dispute["llm1_result"].get("localization_group_count")
-                or dispute["llm2_result"].get("localization_group_count"),
-                "localization_group_piece_ids": dispute["llm1_result"].get("localization_group_piece_ids")
-                or dispute["llm2_result"].get("localization_group_piece_ids"),
-                "all_localized_piece_ids": dispute["llm1_result"].get("all_localized_piece_ids")
-                or dispute["llm2_result"].get("all_localized_piece_ids"),
-                "localization_scope": dispute["llm1_result"].get("localization_scope")
-                or dispute["llm2_result"].get("localization_scope"),
-                "anchor_text": dispute["llm1_result"].get("anchor_text")
-                or dispute["llm2_result"].get("anchor_text"),
-            }
+            verified_results[i] = _flatten_arbitration_record(dispute, result)
 
     await asyncio.gather(*[_worker(i, dispute) for i, dispute in enumerate(disputes)])
 
-    verified: list[dict[str, Any]] = []
-    for row in verified_results:
-        if row is not None:
-            verified.append(row)
+    verified: list[dict[str, Any]] = [row for row in verified_results if row is not None]
 
     llm3_yaml_path = project_dir / "2_llm3_verified.yaml"
     write_yaml(llm3_yaml_path, verified)
     write_json(stage2_internal_json_path(project_dir, "2_llm3_verified.json"), verified)
 
-    final_corpus = consensus + verified
+    accepted_verified = [row for row in verified if row.get("is_relevant") is True]
+    final_corpus = consensus + accepted_verified
 
     final_yaml_path = project_dir / "2_final_corpus.yaml"
     write_yaml(final_yaml_path, final_corpus)
     write_json(stage2_internal_json_path(project_dir, "2_final_corpus.json"), final_corpus)
 
     logger.info(
-        "阶段2.3-2.4完成: consensus=%s disputed=%s verified=%s final=%s",
+        "阶段2.3-2.4完成: consensus=%s disputed=%s arbitrated=%s accepted=%s final=%s",
         len(consensus),
         len(disputes),
         len(verified),
+        len(accepted_verified),
         len(final_corpus),
     )
     return final_corpus

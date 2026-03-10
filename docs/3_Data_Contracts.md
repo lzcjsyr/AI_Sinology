@@ -106,8 +106,8 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 ```
 
 **2. 落盘文件 (`2_llm1_raw.jsonl` 和 `2_llm2_raw.jsonl`) 的完整单行 Schema**：
-调度的纯 Python 脚本（`archival_screening.py`）在接收到粗筛数组后，会对每个**相关主题**发起二次定位，要求 LLM 返回该主题在 batch 内的 `evidence_groups`。每个证据组内部可以覆盖一个或多个相邻 piece，不同证据组之间允许不相邻。
-脚本最终仍以 `(piece_id, matched_theme)` 为最小落盘单位，但会把同一主题的证据组元数据一并写入，以便下游仲裁和人工审计：
+调度的纯 Python 脚本（`archival_screening.py`）在接收到粗筛数组后，会把命中 batch 直接拆成多个 piece，再对每个 piece 发起二次分析。该次分析会额外提供前后相邻 piece 的少量上下文，但模型只允许判断当前正文，并且 `anchor_text` 只能来自当前 piece。
+脚本最终仍以 `(piece_id, matched_theme)` 为最小落盘单位；为兼容下游仲裁与审计，仍保留定位元数据，但默认都对应单 piece：
 
 ```json
 {
@@ -115,22 +115,24 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   "source_file": "string",        // 代码直接注入
   "original_text": "string",      // 代码直接注入
   "matched_theme": "string",      // 拆解自主题配置中的 theme
-  "is_relevant": true,            // 只落盘命中结果；失败兜底时才写 false
-  "reason": "string",             // 当前 evidence_group 对该 piece 的理由
-  "anchor_text": "string",        // 当前 evidence_group 的文本锚点
+  "is_relevant": true,            // 命中为 true；若批次解析失败，兜底记录会写 false
+  "judgment_status": "relevant",  // relevant | irrelevant | screening_error
+  "reason": "string",             // 当前 piece 对该主题的理由
+  "anchor_text": "string",        // 当前 piece 内的文本锚点
   "screening_batch_id": "string",
-  "localization_method": "string",
-  "localization_bundle_id": "string",
+  "localization_method": "piece_direct_with_neighbors",
+  "localization_bundle_id": "batch_00000001::T1::piece_a",
   "localization_group_index": 1,
-  "localization_group_count": 2,
+  "localization_group_count": 1,
   "localization_group_piece_ids": ["piece_a"],
-  "all_localized_piece_ids": ["piece_a", "piece_c"],
-  "localization_scope": "single | multi_contiguous | multi_discontiguous"
+  "all_localized_piece_ids": ["piece_a"],
+  "localization_scope": "single"
 }
 ```
 
 > [!TIP]
-> **Token 开销与速度优化：** 粗筛与精定位解耦后，第一轮只回答“是否相关”，第二轮只针对命中主题定位证据组。这避免了在粗筛阶段为所有主题生成长文本定位说明，同时又能覆盖“同一主题跨多个 piece、且关键词不同”的情况。
+> **Token 开销与速度优化：** 粗筛与逐 piece 分析解耦后，第一轮只回答“是否相关”，第二轮只针对命中 batch 内的单个 piece 返回 `is_relevant / anchor_text / reason`。这避免了长 `evidence_groups` JSON 的解析负担，同时让每条正样本的证据归属天然落在当前 piece 上。
+> 若某个 batch 因 JSON 解析或结构校验失败而触发兜底，记录会显式带上 `judgment_status: screening_error` 与 `screening_error`，以免与真实的 `false` 判定混淆。
 
 ## 阶段 2.3：共识与争议分流 (Consensus & Dispute Shunting)
 
@@ -161,7 +163,7 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   matched_theme: "商人形象"
   is_relevant: true
   reason: "明确描写了市井商人的聚集场景。"
-  localization_bundle_id: "batch_00000001::T1"
+  localization_bundle_id: "batch_00000001::T1::pb:KR1a0001_tls_001-1a"
   localization_scope: "single"
   anchor_text: "商贾云集"
 ```
@@ -216,17 +218,17 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
 
 ### [输出] 2_llm3_verified.yaml (仲裁结果)
 
-由第三方大模型读取争议档案并做出最终独立判定。若相关，则提取保留；若无关，则直接丢弃。
+由第三方大模型读取争议档案并做出最终独立判定。**无论最终判定为相关还是无关，均必须保留该条仲裁记录与明确理由**，便于人工复核与审计。
 
-- **格式要求**：必须剥离 2.3 阶段争议文件中的双模型嵌套对比结构，打平恢复为最扁平的标准结构，即与最初阶段 2.2 `raw.jsonl` 单条提取的字段要素**完全一致**（转为 YAML 展现）。这保证了下一步合并系统的无缝对接。
+- **格式要求**：必须剥离 2.3 阶段争议文件中的双模型嵌套对比结构，打平恢复为最扁平的标准结构，即与最初阶段 2.2 `raw.jsonl` 单条提取的字段要素**完全一致**（转为 YAML 展现）。其中 `is_relevant` 可为 `true` 或 `false`，但 `reason` 必须始终为非空字符串。
 
 ---
 
 ### [输出] 2_final_corpus.yaml (核心总库) + `_internal/stage2/2_final_corpus.json` (内部镜像)
 
-**明确定义**：`2_final_corpus.yaml` 在物理和逻辑上，就是 `2_consensus_data.yaml`（无分歧共识档案）与 `2_llm3_verified.yaml`（存在争议但经过第三方大模型重裁后的有效档案）这**两个文件的直接全量合并**，作为最后沉淀出的核心 RAG 底料；系统会同时将等价内容写入 `_internal/stage2/2_final_corpus.json`，仅供后续阶段程序内部读取。
+**明确定义**：`2_final_corpus.yaml` 在逻辑上，由 `2_consensus_data.yaml`（无分歧共识档案）与 `2_llm3_verified.yaml` 中 **`is_relevant: true` 的仲裁通过档案** 合并而成，作为最后沉淀出的核心 RAG 底料；系统会同时将等价内容写入 `_internal/stage2/2_final_corpus.json`，仅供后续阶段程序内部读取。
 
-- **数据结构与契约**：使用 YAML 格式，保留多行文本 (`|` 语法)。由于 `2_llm3_verified.yaml` 已经被强制要求剥离嵌套争议，格式恢复为最初单源分析时的扁平结构，因此合并拼接后的核心史料总库格式要素与最初阶段**完全一致**。
+- **数据结构与契约**：使用 YAML 格式，保留多行文本 (`|` 语法)。由于 `2_llm3_verified.yaml` 已经被强制要求剥离嵌套争议，格式恢复为最初单源分析时的扁平结构，因此筛选并拼接后的核心史料总库格式要素与最初阶段**完全一致**。
 
 ```yaml
 - piece_id: "pb:KR1a0001_tls_001-1a"
@@ -237,7 +239,7 @@ LLM 的 JSON 必须极致精简，**严格禁止**其复述原文或返回 `piec
   is_relevant: true
   reason: |
     明确描写了市井商人的聚集场景，能够佐证晚明城市经济的繁荣，符合商人形象的主题要求。
-  localization_bundle_id: "batch_00000001::T1"
+  localization_bundle_id: "batch_00000001::T1::pb:KR1a0001_tls_001-1a"
   localization_scope: "single"
   anchor_text: "商贾云集"
 ```

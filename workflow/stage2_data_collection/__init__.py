@@ -223,7 +223,7 @@ def _write_failure_report(
     write_text(project_dir / "2_stage_failure_report.md", report + "\n")
 
 
-def run_stage2_data_collection(
+async def _run_stage2_data_collection_async(
     *,
     project_dir: Path,
     kanripo_dir: Path,
@@ -234,40 +234,22 @@ def run_stage2_data_collection(
     llm2_endpoint: LLMEndpointConfig,
     llm3_endpoint: LLMEndpointConfig,
     logger,
-    max_fragments: int | None = None,
-    max_empty_retries: int = 2,
-    llm1_concurrency: int | None = None,
-    llm2_concurrency: int | None = None,
-    arbitration_concurrency: int | None = None,
-    sync_headroom: float = 0.85,
-    sync_max_ahead: int = 128,
-    sync_mode: str = "lowest_shared",
-    fragment_max_attempts: int = 3,
-    retry_backoff_seconds: float = 2.0,
-    screening_batch_max_chars: int = 300,
+    processed_dir: Path,
+    signature: dict[str, Any],
+    can_resume: bool,
+    resume_limit: int | None,
+    max_fragments: int | None,
+    max_empty_retries: int,
+    llm1_concurrency: int | None,
+    llm2_concurrency: int | None,
+    arbitration_concurrency: int | None,
+    sync_headroom: float,
+    sync_max_ahead: int,
+    sync_mode: str,
+    fragment_max_attempts: int,
+    retry_backoff_seconds: float,
+    screening_batch_max_chars: int,
 ) -> list[dict[str, Any]]:
-    if not selected_scopes:
-        raise ValueError("阶段二需要至少一个语料范围（scope）。")
-
-    processed_dir = project_dir / "_processed_data"
-    ensure_dir(processed_dir)
-    ensure_dir(stage2_internal_dir(project_dir))
-
-    existing_final = _load_existing_final(project_dir)
-    if existing_final is not None:
-        logger.info("阶段二已存在有效 final corpus，直接复用。")
-        return existing_final
-
-    signature = _signature(
-        selected_scopes,
-        target_themes,
-        llm1_endpoint,
-        llm2_endpoint,
-        llm3_endpoint,
-        screening_batch_max_chars,
-    )
-    can_resume, resume_limit = _can_resume(project_dir=project_dir, signature=signature)
-
     attempt = 0
     current_limit = resume_limit if can_resume else max_fragments
     latest_screening_audit: dict[str, Any] | None = None
@@ -308,24 +290,22 @@ def run_stage2_data_collection(
             },
         )
 
-        llm1_raw_path, llm2_raw_path, screening_audit = asyncio.run(
-            run_archival_screening(
-                project_dir=project_dir,
-                fragments_path=fragments_path,
-                target_themes=target_themes,
-                llm_client=llm_client,
-                llm1_endpoint=llm1_endpoint,
-                llm2_endpoint=llm2_endpoint,
-                logger=logger,
-                llm1_concurrency=llm1_concurrency,
-                llm2_concurrency=llm2_concurrency,
-                sync_headroom=sync_headroom,
-                sync_max_ahead=sync_max_ahead,
-                sync_mode=sync_mode,
-                fragment_max_attempts=fragment_max_attempts,
-                retry_backoff_seconds=retry_backoff_seconds,
-                screening_batch_max_chars=screening_batch_max_chars,
-            )
+        llm1_raw_path, llm2_raw_path, screening_audit = await run_archival_screening(
+            project_dir=project_dir,
+            fragments_path=fragments_path,
+            target_themes=target_themes,
+            llm_client=llm_client,
+            llm1_endpoint=llm1_endpoint,
+            llm2_endpoint=llm2_endpoint,
+            logger=logger,
+            llm1_concurrency=llm1_concurrency,
+            llm2_concurrency=llm2_concurrency,
+            sync_headroom=sync_headroom,
+            sync_max_ahead=sync_max_ahead,
+            sync_mode=sync_mode,
+            fragment_max_attempts=fragment_max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+            screening_batch_max_chars=screening_batch_max_chars,
         )
         latest_screening_audit = screening_audit
 
@@ -339,18 +319,26 @@ def run_stage2_data_collection(
                 "screening_audit": screening_audit,
             },
         )
+        _write_manifest(
+            project_dir,
+            {
+                "status": "arbitrating",
+                "attempt": attempt,
+                "max_fragments": current_limit,
+                "signature": signature,
+                "screening_audit": screening_audit,
+            },
+        )
 
-        final_corpus = asyncio.run(
-            run_archival_arbitration(
-                project_dir=project_dir,
-                llm1_raw_path=llm1_raw_path,
-                llm2_raw_path=llm2_raw_path,
-                llm_client=llm_client,
-                llm3_endpoint=llm3_endpoint,
-                logger=logger,
-                concurrency=arbitration_concurrency,
-                retry_backoff_seconds=retry_backoff_seconds,
-            )
+        final_corpus = await run_archival_arbitration(
+            project_dir=project_dir,
+            llm1_raw_path=llm1_raw_path,
+            llm2_raw_path=llm2_raw_path,
+            llm_client=llm_client,
+            llm3_endpoint=llm3_endpoint,
+            logger=logger,
+            concurrency=arbitration_concurrency,
+            retry_backoff_seconds=retry_backoff_seconds,
         )
 
         if final_corpus:
@@ -401,6 +389,80 @@ def run_stage2_data_collection(
     raise RuntimeError(
         "阶段二失败：多次重试后 `2_final_corpus.yaml` 仍为空，已停止流程。"
         "详见 2_stage_failure_report.md。"
+    )
+
+
+def run_stage2_data_collection(
+    *,
+    project_dir: Path,
+    kanripo_dir: Path,
+    selected_scopes: list[str],
+    target_themes: list[dict[str, str]],
+    llm_client: OpenAICompatClient,
+    llm1_endpoint: LLMEndpointConfig,
+    llm2_endpoint: LLMEndpointConfig,
+    llm3_endpoint: LLMEndpointConfig,
+    logger,
+    max_fragments: int | None = None,
+    max_empty_retries: int = 2,
+    llm1_concurrency: int | None = None,
+    llm2_concurrency: int | None = None,
+    arbitration_concurrency: int | None = None,
+    sync_headroom: float = 0.85,
+    sync_max_ahead: int = 128,
+    sync_mode: str = "lowest_shared",
+    fragment_max_attempts: int = 5,
+    retry_backoff_seconds: float = 2.0,
+    screening_batch_max_chars: int = 300,
+) -> list[dict[str, Any]]:
+    if not selected_scopes:
+        raise ValueError("阶段二需要至少一个语料范围（scope）。")
+
+    processed_dir = project_dir / "_processed_data"
+    ensure_dir(processed_dir)
+    ensure_dir(stage2_internal_dir(project_dir))
+
+    existing_final = _load_existing_final(project_dir)
+    if existing_final is not None:
+        logger.info("阶段二已存在有效 final corpus，直接复用。")
+        return existing_final
+
+    signature = _signature(
+        selected_scopes,
+        target_themes,
+        llm1_endpoint,
+        llm2_endpoint,
+        llm3_endpoint,
+        screening_batch_max_chars,
+    )
+    can_resume, resume_limit = _can_resume(project_dir=project_dir, signature=signature)
+    return asyncio.run(
+        _run_stage2_data_collection_async(
+            project_dir=project_dir,
+            kanripo_dir=kanripo_dir,
+            selected_scopes=selected_scopes,
+            target_themes=target_themes,
+            llm_client=llm_client,
+            llm1_endpoint=llm1_endpoint,
+            llm2_endpoint=llm2_endpoint,
+            llm3_endpoint=llm3_endpoint,
+            logger=logger,
+            processed_dir=processed_dir,
+            signature=signature,
+            can_resume=can_resume,
+            resume_limit=resume_limit,
+            max_fragments=max_fragments,
+            max_empty_retries=max_empty_retries,
+            llm1_concurrency=llm1_concurrency,
+            llm2_concurrency=llm2_concurrency,
+            arbitration_concurrency=arbitration_concurrency,
+            sync_headroom=sync_headroom,
+            sync_max_ahead=sync_max_ahead,
+            sync_mode=sync_mode,
+            fragment_max_attempts=fragment_max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+            screening_batch_max_chars=screening_batch_max_chars,
+        )
     )
 
 

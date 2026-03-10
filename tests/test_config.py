@@ -115,7 +115,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.stage2_llm1.tpm, 5000000)
         self.assertEqual(config.stage2_llm2.rpm, 30000)
         self.assertEqual(config.stage2_llm2.tpm, 5000000)
-        self.assertEqual(config.stage2_fragment_max_attempts, 3)
+        self.assertEqual(config.stage2_fragment_max_attempts, 5)
         self.assertEqual(config.stage2_max_empty_retries, 2)
         self.assertEqual(config.stage2_screening_batch_max_chars, 300)
 

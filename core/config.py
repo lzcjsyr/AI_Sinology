@@ -100,8 +100,8 @@ STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     "arbitration_concurrency": None,
     
     # ---------------- 容错与重试机制 ----------------
-    # 单个片段在单次遇到 LLM 请求失败（网络错误、超时等）时的最大重试次数
-    "fragment_max_attempts": 3,
+    # 单个片段在单次遇到 LLM 请求失败（网络错误、超时、JSON 解析失败等）时的最大重试次数
+    "fragment_max_attempts": 5,
     # 阶段级最大空跑重试次数：如果整个阶段二跑完未产生有效结果集（2_final_corpus），
     # 系统允许自动扩增碎片池并重跑的最大次数
     "max_empty_retries": 2,

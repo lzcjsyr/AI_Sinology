@@ -1,52 +1,51 @@
 metadata:
   step: stage2_localization
-  purpose: 对粗筛命中的批次进行精确片段定位。
+  purpose: 对粗筛命中的批次按 piece 直接分析。
 
 variables:
-  unresolved_themes_block: 待精确定位的主题列表。
-  batch_id: 粗筛批次唯一标识。
-  source_file: 来源文件名。
-  batch_text: 合并后的史料正文。
-  piece_catalog_json: 批内原始片段目录 JSON。
+  unresolved_themes_block: 待分析主题列表。
+  source_file: 当前片段所属古籍标题或文献来源，来自原文元数据，不是文件路径。
+  current_piece_text: 当前 piece 正文。
+  prev_piece_text: 前一 piece 正文，可为空。
+  next_piece_text: 后一 piece 正文，可为空。
 
 prompt:
   system: |
-    你是严谨的片段定位助手。
+    你是结构化片段分析器。
     你必须只返回一个 JSON 对象，禁止输出任何额外内容。
-    输出格式（严格遵循）：
+    格式：
     {
       "matches": [
         {
           "theme_id": "T1",
-          "evidence_groups": [
-            {
-              "piece_ids": ["pb:..."],
-              "anchor_text": "文本锚点",
-              "reason": "该证据组为何支持主题"
-            }
-          ]
+          "is_relevant": true,
+          "anchor_text": "文本锚点",
+          "reason": "判断理由"
         }
       ]
     }
-    约束：
-    1) 你只处理输入里列出的主题，每个主题都必须返回一条 matches 记录。
-    2) evidence_groups 必须是非空数组；每个组都表示一个独立证据块。
-    3) 每个 evidence_group 的 piece_ids 只能从给定的 piece_catalog_json 中选择，禁止编造。
-    4) 若一个证据块只落在一个片段，piece_ids 只返回那一个 piece_id；若跨多个相邻片段才完整成立，可在同一组中返回多个 piece_id。
-    5) 若同一主题分散在多个不相邻 piece，必须拆成多个 evidence_group，而不是强行合并成一个组。
-    6) 同一个 piece_id 在同一主题下只能出现一次，不得在多个组重复。
-    7) 每个组的 anchor_text 与 reason 都必须为非空字符串。
+    规则：
+    1) 每个主题都必须返回一条 matches 记录，只能用输入里的 T 编号。
+    2) 你只判断当前正文；上下文只作辅助理解。
+    3) 只有当当前正文本身提供证据时，is_relevant 才能为 true。
+    4) 若 is_relevant=true，anchor_text 和 reason 必须非空。
+    5) anchor_text 必须取自当前正文，不能取自上下文。
+    6) 若证据只在上下文、当前正文本身不提供证据，返回 false。
+    7) 合法 JSON；双引号；true/false；无额外文本。
   user_template: |
-    你是古籍史料精确定位助手。请对下列已经粗筛命中的主题，定位到最小必要的原始 piece_id。
+    请判断下方当前正文是否支持下列主题。
 
-    待定位主题：
+    主题：
     ${unresolved_themes_block}
 
-    粗筛批次 batch_id=${batch_id}
-    source_file=${source_file}
+    书名与文献来源（当前片段所属古籍标题）=
+    ${source_file}
 
-    batch_text=
-    ${batch_text}
+    当前需要判断的正文=
+    ${current_piece_text}
 
-    piece_catalog_json=
-    ${piece_catalog_json}
+    上文=
+    ${prev_piece_text}
+
+    下文=
+    ${next_piece_text}

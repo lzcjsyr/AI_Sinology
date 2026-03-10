@@ -20,8 +20,8 @@ prompt:
     }
     约束：
     1) is_relevant 必须是布尔值。
-    2) 若 is_relevant=false，则 reason 必须为 null。
-    3) 若 is_relevant=true，则 reason 必须为非空字符串。
+    2) 无论 is_relevant 为 true 还是 false，reason 都必须是非空字符串。
+    3) 必须使用合法 JSON：键名和字符串一律使用英文双引号，禁止 markdown 代码块或额外说明。
   user_template: |
     你是第三方学术仲裁模型。请在给定主题下判断该史料是否相关。
 
